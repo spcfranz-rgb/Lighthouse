@@ -161,6 +161,7 @@ def monitor_loop():
             except Exception:
                 pass
             
+            # 1. PROCESS SWITCHES & THEIR ATTACHED CAMERAS
             cursor.execute("SELECT * FROM switches")
             switches = cursor.fetchall()
             now = time.time()
@@ -171,7 +172,6 @@ def monitor_loop():
                 
                 is_up = is_pingable(switch_ip) or is_port_open(switch_ip, 80) or is_port_open(switch_ip, 443)
                 
-                # Explicitly publish MAINTENANCE state to MQTT
                 switch_payload = "MAINTENANCE" if silenced else (1 if is_up else 0)
                 client.publish(f"{prefix}/{switch_name}/ping", switch_payload, retain=True)
                 
@@ -209,6 +209,35 @@ def monitor_loop():
                 else:
                     cursor.execute("UPDATE switches SET status = ? WHERE id = ?", ('DOWN' if not silenced else 'DOWN (Silenced)', switch_id))
                     cursor.execute("UPDATE cameras SET status = ? WHERE switch_id = ?", ('UNREACHABLE (Switch Down)' if not silenced else 'UNREACHABLE (Silenced)', switch_id))
+
+            # 2. PROCESS STANDALONE CAMERAS (No switch attached)
+            cursor.execute("SELECT * FROM cameras WHERE switch_id IS NULL OR switch_id = ''")
+            standalone_cameras = cursor.fetchall()
+            for cam in standalone_cameras:
+                cam_id, cam_name, cam_ip, stream_url, c_until = cam['id'], cam['name'], cam['ip'], cam['stream_url'], cam['silenced_until']
+                cam_silenced = c_until > now
+                
+                cam_up = is_pingable(cam_ip) or is_port_open(cam_ip, 554) or is_port_open(cam_ip, 80)
+                
+                if cam_up:
+                    stream_ok = is_stream_active(stream_url)
+                    if cam_silenced:
+                        client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
+                        client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
+                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)', cam_id))
+                    else:
+                        client.publish(f"{prefix}/{cam_name}/ping", 1, retain=True)
+                        client.publish(f"{prefix}/{cam_name}/stream", 1 if stream_ok else 0, retain=True)
+                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP' if stream_ok else 'DOWN (Stream Error)', cam_id))
+                else:
+                    if cam_silenced:
+                        client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
+                        client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
+                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Silenced)', cam_id))
+                    else:
+                        client.publish(f"{prefix}/{cam_name}/ping", 0, retain=True)
+                        client.publish(f"{prefix}/{cam_name}/stream", 0, retain=True)
+                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Offline)', cam_id))
 
             conn.commit()
             conn.close()
@@ -252,7 +281,13 @@ def index():
     now = time.time()
     conn = get_db()
     switches = conn.execute("SELECT *, (silenced_until > ?) as is_silenced FROM switches", (now,)).fetchall()
-    cameras = conn.execute("SELECT c.*, s.name as switch_name, (c.silenced_until > ?) as is_silenced FROM cameras c JOIN switches s ON c.switch_id = s.id", (now,)).fetchall()
+    
+    # Use a LEFT JOIN so cameras without a switch still render on the page
+    cameras = conn.execute("""
+        SELECT c.*, s.name as switch_name, (c.silenced_until > ?) as is_silenced 
+        FROM cameras c 
+        LEFT JOIN switches s ON c.switch_id = s.id
+    """, (now,)).fetchall()
     
     cursor = conn.cursor()
     cursor.execute("SELECT key, value FROM settings")
@@ -395,11 +430,14 @@ def delete_switch(id):
 @login_required
 @admin_required
 def add_camera():
+    switch_id = request.form.get('switch_id')
+    switch_id = switch_id if switch_id else None  # Converts an empty string to proper SQL NULL
+
     conn = get_db()
     conn.execute("""
         INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) 
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (request.form['switch_id'], request.form['name'], request.form['ip'], 
+    """, (switch_id, request.form['name'], request.form['ip'], 
           request.form['stream_url'], request.form.get('manufacturer', 'Other'),
           request.form.get('username', ''), request.form.get('password', '')))
     conn.commit()
@@ -413,10 +451,13 @@ def add_camera():
 def edit_camera(id):
     conn = get_db()
     if request.method == 'POST':
+        switch_id = request.form.get('switch_id')
+        switch_id = switch_id if switch_id else None # Converts an empty string to proper SQL NULL
+
         conn.execute("""
             UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, 
             manufacturer = ?, username = ?, password = ? WHERE id = ?
-        """, (request.form['switch_id'], request.form['name'], request.form['ip'], 
+        """, (switch_id, request.form['name'], request.form['ip'], 
               request.form['stream_url'], request.form.get('manufacturer', 'Other'),
               request.form.get('username', ''), request.form.get('password', ''), id))
         conn.commit()
@@ -598,9 +639,3 @@ def proxy_absolute_paths(e):
             return proxy_request(device_type, device_id, request.path, request.method, request.headers, request.get_data(), request.cookies)
     
     return "404 - Not Found", 404
-
-if __name__ == '__main__':
-    init_db()
-    monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
-    monitor_thread.start()
-    app.run(host='0.0.0.0', port=5000, debug=False)
