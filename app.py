@@ -8,7 +8,7 @@ import ipaddress
 import paho.mqtt.client as mqtt
 from urllib.parse import urlparse
 from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, abort, flash, Response
+from flask import Flask, render_template, request, redirect, url_for, abort, flash, Response, jsonify
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -16,11 +16,8 @@ app = Flask(__name__)
 
 # --- SECURITY HARDENING: SESSIONS ---
 app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key') 
-# Prevent JavaScript from accessing the session cookie (XSS Protection)
 app.config['SESSION_COOKIE_HTTPONLY'] = True 
-# Prevent browser from sending the cookie with cross-site requests (CSRF Protection)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-# Force HTTPS cookies ONLY if explicitly enabled in .env
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').lower() == 'true'
 
 # ==========================================
@@ -229,6 +226,22 @@ def index():
     
     return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users)
 
+@app.route('/api/status')
+@login_required
+def api_status():
+    conn = get_db()
+    switches = conn.execute("SELECT id, status FROM switches").fetchall()
+    cameras = conn.execute("SELECT id, status FROM cameras").fetchall()
+    conn.close()
+    
+    status_data = {}
+    for s in switches:
+        status_data[f"switch_{s['id']}"] = s['status']
+    for c in cameras:
+        status_data[f"camera_{c['id']}"] = c['status']
+        
+    return jsonify(status_data)
+
 @app.route('/update_settings', methods=['POST'])
 @login_required
 @admin_required
@@ -422,7 +435,6 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
     # --- SECURITY HARDENING: SSRF PROTECTION ---
     try:
         ip_obj = ipaddress.ip_address(device['ip'])
-        # Ensure the requested IP is strictly a private, local network IP
         if not ip_obj.is_private or ip_obj.is_loopback:
              return "Security Policy Violation: Target IP is not a valid local device.", 403
     except ValueError:
@@ -477,10 +489,7 @@ def proxy_absolute_paths(e):
     return "404 - Not Found", 404
 
 if __name__ == '__main__':
-    # Initialize the DB and Background tasks
     init_db()
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     monitor_thread.start()
-    
-    # We leave this here so you can still run `python app.py` locally if not using Docker
     app.run(host='0.0.0.0', port=5000, debug=False)
