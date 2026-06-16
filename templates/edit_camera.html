@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <title>Edit Camera - CCTV Monitor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="container py-5 d-flex justify-content-center">
+
+    <div class="card w-100" style="max-width: 500px;">
+        <div class="card-header">
+            <h5 class="mb-0">Edit Camera</h5>
+        </div>
+        <div class="card-body">
+            <form action="/edit_camera/{{ camera.id }}" method="POST">
+                
+                <div class="mb-3">
+                    <label class="form-label text-muted">Parent Switch</label>
+                    <select name="switch_id" class="form-select" required>
+                        {% for s in switches %}
+                        <option value="{{ s.id }}" {% if s.id == camera.switch_id %}selected{% endif %}>
+                            {{ s.name }} ({{ s.ip }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label text-muted">Camera Name</label>
+                    <input type="text" name="name" class="form-control" value="{{ camera.name }}" required>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label text-muted">IP Address</label>
+                    <input type="text" name="ip" class="form-control" value="{{ camera.ip }}" required>
+                </div>
+
+                <div class="mb-4">
+                    <label class="form-label text-muted">RTSP Stream URL</label>
+                    <input type="text" name="stream_url" class="form-control" value="{{ camera.stream_url }}" required>
+                </div>
+
+                <div class="d-flex justify-content-between">
+                    <a href="/" class="btn btn-outline-secondary">Cancel</a>
+                    <button type="submit" class="btn btn-success">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
