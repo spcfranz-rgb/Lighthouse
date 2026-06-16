@@ -347,4 +347,213 @@ def add_camera():
     conn.execute("""
         INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) 
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (request.form['switch_id'], request.form['name'], request.form['ip'],
+    """, (request.form['switch_id'], request.form['name'], request.form['ip'], 
+          request.form['stream_url'], request.form.get('manufacturer', 'Other'),
+          request.form.get('username', ''), request.form.get('password', '')))
+    conn.commit()
+    conn.close()
+    flash('Camera added.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/edit_camera/<int:id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_camera(id):
+    conn = get_db()
+    if request.method == 'POST':
+        conn.execute("""
+            UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, 
+            manufacturer = ?, username = ?, password = ? WHERE id = ?
+        """, (request.form['switch_id'], request.form['name'], request.form['ip'], 
+              request.form['stream_url'], request.form.get('manufacturer', 'Other'),
+              request.form.get('username', ''), request.form.get('password', ''), id))
+        conn.commit()
+        conn.close()
+        flash('Camera updated.', 'success')
+        return redirect(url_for('index'))
+    
+    camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (id,)).fetchone()
+    switches = conn.execute("SELECT * FROM switches").fetchall()
+    conn.close()
+    return render_template('edit_camera.html', camera=camera, switches=switches)
+
+@app.route('/delete_camera/<int:id>')
+@login_required
+@admin_required
+def delete_camera(id):
+    conn = get_db()
+    conn.execute("DELETE FROM cameras WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('Camera deleted.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/add_user', methods=['POST'])
+@login_required
+@admin_required
+def add_user():
+    username = request.form['username']
+    password = generate_password_hash(request.form['password'])
+    role = request.form['role']
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, password, role))
+        conn.commit()
+        flash('User added.', 'success')
+    except sqlite3.IntegrityError:
+        flash('Username already exists.', 'danger')
+    conn.close()
+    return redirect(url_for('index'))
+
+@app.route('/delete_user/<int:id>')
+@login_required
+@admin_required
+def delete_user(id):
+    if id == current_user.id:
+        flash('You cannot delete yourself.', 'danger')
+        return redirect(url_for('index'))
+    conn = get_db()
+    conn.execute("DELETE FROM users WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    flash('User deleted.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/snapshot/<int:id>')
+@login_required
+def snapshot(id):
+    conn = get_db()
+    camera = conn.execute("SELECT stream_url, ip, manufacturer, username, password FROM cameras WHERE id = ?", (id,)).fetchone()
+    conn.close()
+    
+    if not camera:
+        return "Camera not found", 404
+        
+    mfg = camera['manufacturer']
+    ip = camera['ip']
+    user = camera['username']
+    pwd = camera['password']
+    
+    # 1. Try Native HTTP Snapshot First (Instant & Low CPU)
+    if mfg and mfg != 'Other':
+        url = None
+        auth_in_url = False
+        
+        # Build the proper API string based on manufacturer
+        if mfg == 'Hikvision':
+            url = f"http://{ip}/ISAPI/Streaming/channels/101/picture"
+        elif mfg in ['Dahua', 'Amcrest']:
+            url = f"http://{ip}/cgi-bin/snapshot.cgi?chn=1"
+        elif mfg == 'Axis':
+            url = f"http://{ip}/axis-cgi/jpg/image.cgi"
+        elif mfg == 'Foscam':
+            url = f"http://{ip}/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2&usr={user}&pwd={pwd}"
+            auth_in_url = True
+            
+        if url:
+            try:
+                if auth_in_url:
+                    resp = requests.get(url, timeout=3)
+                else:
+                    # Most modern CCTV cameras use Digest Authentication by default.
+                    resp = requests.get(url, auth=HTTPDigestAuth(user, pwd), timeout=3)
+                    # If it rejects Digest, fall back to Basic Auth.
+                    if resp.status_code != 200:
+                        resp = requests.get(url, auth=HTTPBasicAuth(user, pwd), timeout=3)
+                        
+                if resp.status_code == 200 and 'image' in resp.headers.get('Content-Type', ''):
+                    return Response(resp.content, mimetype='image/jpeg')
+            except Exception as e:
+                # Silently catch the error. The code will proceed downward to the FFmpeg fallback.
+                print(f"HTTP Snapshot failed for {ip}: {e}. Falling back to FFmpeg.")
+
+    # 2. FFmpeg Fallback (If 'Other', or if the HTTP API call above failed)
+    try:
+        cmd = ['ffmpeg', '-y', '-rtsp_transport', 'tcp', '-i', camera['stream_url'], '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-']
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        
+        if process.returncode == 0:
+            return Response(process.stdout, mimetype='image/jpeg')
+        else:
+            return f"Failed to grab snapshot via HTTP or RTSP", 500
+    except subprocess.TimeoutExpired:
+        return "Timeout reaching camera", 504
+    except Exception as e:
+        return str(e), 500
+
+# ==========================================
+# WEB UI TUNNELING (REVERSE PROXY)
+# ==========================================
+def proxy_request(device_type, device_id, req_path, method, headers, data, cookies):
+    conn = get_db()
+    if device_type == 'switch':
+        device = conn.execute("SELECT ip FROM switches WHERE id = ?", (device_id,)).fetchone()
+    elif device_type == 'camera':
+        device = conn.execute("SELECT ip FROM cameras WHERE id = ?", (device_id,)).fetchone()
+    else:
+        return "Invalid device type", 404
+    conn.close()
+
+    if not device:
+        return "Device not found", 404
+
+    try:
+        ip_obj = ipaddress.ip_address(device['ip'])
+        if not ip_obj.is_private or ip_obj.is_loopback:
+             return "Security Policy Violation: Target IP is not a valid local device.", 403
+    except ValueError:
+        return "Invalid IP Address format.", 400
+
+    query_string = request.query_string.decode('utf-8')
+    full_req_path = f"{req_path}?{query_string}" if query_string else req_path
+    target_url = f"http://{device['ip']}/{full_req_path.lstrip('/')}"
+    clean_headers = {k: v for k, v in headers if k.lower() not in ['host', 'origin', 'referer', 'accept-encoding']}
+    
+    try:
+        resp = requests.request(
+            method=method, url=target_url, headers=clean_headers, data=data,
+            cookies=cookies, allow_redirects=False, stream=True, timeout=15
+        )
+        
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        resp_headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
+        
+        for i, (name, value) in enumerate(resp_headers):
+            if name.lower() == 'location':
+                if value.startswith(f"http://{device['ip']}"):
+                    value = value.replace(f"http://{device['ip']}", f"/tunnel/{device_type}/{device_id}")
+                elif value.startswith('/'):
+                    value = f"/tunnel/{device_type}/{device_id}{value}"
+                resp_headers[i] = (name, value)
+
+        return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
+    except requests.exceptions.RequestException as e:
+        return f"Tunnel Error connecting to {device['ip']}: {str(e)}", 502
+
+@app.route('/tunnel/<device_type>/<int:device_id>/', defaults={'req_path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/tunnel/<device_type>/<int:device_id>/<path:req_path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@login_required
+def tunnel(device_type, device_id, req_path):
+    return proxy_request(device_type, device_id, req_path, request.method, request.headers, request.get_data(), request.cookies)
+
+@app.errorhandler(404)
+def proxy_absolute_paths(e):
+    if not current_user.is_authenticated:
+        return "404 - Not Found", 404
+
+    referer = request.headers.get('Referer')
+    if referer:
+        parsed_referer = urlparse(referer)
+        parts = parsed_referer.path.split('/')
+        if len(parts) >= 4 and parts[1] == 'tunnel':
+            device_type = parts[2]
+            device_id = parts[3]
+            return proxy_request(device_type, device_id, request.path, request.method, request.headers, request.get_data(), request.cookies)
+    
+    return "404 - Not Found", 404
+
+if __name__ == '__main__':
+    init_db()
+    monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+    monitor_thread.start()
+    app.run(host='0.0.0.0', port=5000, debug=False)
