@@ -43,12 +43,17 @@
                                     <a href="/tunnel/switch/{{ s.id }}/" target="_blank" class="badge bg-info text-decoration-none ms-2">WebUI</a>
                                 </td>
                                 <td>
-                                    <span id="status-switch-{{ s.id }}" class="badge {% if s.status == 'UP' %}bg-success{% elif s.status == 'DOWN' %}bg-danger{% else %}bg-secondary{% endif %}">
+                                    <span id="status-switch-{{ s.id }}" class="badge {% if s.status == 'UP' %}bg-success{% elif 'Silenced' in s.status %}bg-warning text-dark{% elif 'DOWN' in s.status %}bg-danger{% else %}bg-secondary{% endif %}">
                                         {{ s.status }}
                                     </span>
                                 </td>
                                 {% if current_user.role == 'admin' %}
                                 <td class="text-end text-nowrap">
+                                    {% if s.is_silenced %}
+                                        <button class="btn btn-warning btn-sm" onclick="toggleSilence('switch', {{ s.id }}, 0)" title="Un-silence Device">🔔</button>
+                                    {% else %}
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="toggleSilence('switch', {{ s.id }}, 24)" title="Silence Alerts (24h)">🔕</button>
+                                    {% endif %}
                                     <a href="/edit_switch/{{ s.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
                                     <a href="/delete_switch/{{ s.id }}" class="btn btn-outline-danger btn-sm">X</a>
                                 </td>
@@ -178,14 +183,19 @@
                                     {{ c.ip }}
                                     <a href="/tunnel/camera/{{ c.id }}/" target="_blank" class="badge bg-info text-decoration-none ms-2">WebUI</a>
                                 </td>
-                                <td>{{ c.switch_name }}</td>
+                                <td><small class="text-muted">{{ c.switch_name or 'Standalone' }}</small></td>
                                 <td>
-                                    <span id="status-camera-{{ c.id }}" class="badge {% if c.status == 'UP' %}bg-success{% elif 'DOWN' in c.status or 'UNREACHABLE' in c.status %}bg-danger{% else %}bg-secondary{% endif %}">
+                                    <span id="status-camera-{{ c.id }}" class="badge {% if c.status == 'UP' %}bg-success{% elif 'Silenced' in c.status %}bg-warning text-dark{% elif 'DOWN' in c.status or 'UNREACHABLE' in c.status %}bg-danger{% else %}bg-secondary{% endif %}">
                                         {{ c.status }}
                                     </span>
                                 </td>
                                 {% if current_user.role == 'admin' %}
                                 <td class="text-end text-nowrap">
+                                    {% if c.is_silenced %}
+                                        <button class="btn btn-warning btn-sm" onclick="toggleSilence('camera', {{ c.id }}, 0)" title="Un-silence Device">🔔</button>
+                                    {% else %}
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="toggleSilence('camera', {{ c.id }}, 24)" title="Silence Alerts (24h)">🔕</button>
+                                    {% endif %}
                                     <a href="/edit_camera/{{ c.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
                                     <a href="/delete_camera/{{ c.id }}" class="btn btn-outline-danger btn-sm">X</a>
                                 </td>
@@ -201,8 +211,8 @@
                     <form action="/add_camera" method="POST">
                         <div class="row gx-2 mb-2">
                             <div class="col-md-3">
-                                <select name="switch_id" class="form-select form-select-sm" required>
-                                    <option value="" disabled selected>Select Switch...</option>
+                                <select name="switch_id" class="form-select form-select-sm">
+                                    <option value="" selected>None (Standalone)</option>
                                     {% for s in switches %}
                                     <option value="{{ s.id }}">{{ s.name }}</option>
                                     {% endfor %}
@@ -266,18 +276,33 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
-<script>
+    <script>
+        function toggleSilence(type, id, hours) {
+            const formData = new FormData();
+            formData.append('hours', hours);
+            fetch('/toggle_silence/' + type + '/' + id, {
+                method: 'POST',
+                body: formData
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                }
+            });
+        }
+    </script>
+
+    <script>
         let modalInstance;
-        let previewInterval; // Stores the 10-second timer
-        let currentPreviewId; // Remembers which camera is currently open
+        let previewInterval;
+        let currentPreviewId;
 
         function showPreview(id, name) {
             currentPreviewId = id;
             
             if (!modalInstance) {
                 modalInstance = new bootstrap.Modal(document.getElementById('previewModal'));
-                
-                // When the modal closes, stop the 10-second refresh timer
                 document.getElementById('previewModal').addEventListener('hidden.bs.modal', function () {
                     if (previewInterval) {
                         clearInterval(previewInterval);
@@ -291,19 +316,15 @@
             const img = document.getElementById('previewImage');
             const spinner = document.getElementById('previewSpinner');
             
-            // Function to load the snapshot
             function fetchSnapshot(isFirstLoad = false) {
                 const timestamp = new Date().getTime();
                 const newSrc = '/snapshot/' + currentPreviewId + '?t=' + timestamp;
                 
                 if (isFirstLoad) {
-                    // Show spinner on the very first load
                     img.classList.add('d-none');
                     spinner.classList.remove('d-none');
                     img.src = newSrc;
                 } else {
-                    // For the 10-second background refreshes, load the image into memory first 
-                    // before swapping it to prevent the screen from flickering black.
                     const tempImg = new Image();
                     tempImg.onload = function() {
                         img.src = this.src;
@@ -312,7 +333,6 @@
                 }
             }
 
-            // Handle success/error of the main image element
             img.onload = function() {
                 spinner.classList.add('d-none');
                 img.classList.remove('d-none');
@@ -320,22 +340,18 @@
             
             img.onerror = function() {
                 spinner.classList.add('d-none');
-                // Only alert and hide if it's the first time trying to open it
                 if (!previewInterval) {
                     alert('Failed to load snapshot. The camera might be offline, or credentials are invalid.');
                     modalInstance.hide();
                 }
             };
             
-            // 1. Clear any old timers just in case
             if (previewInterval) {
                 clearInterval(previewInterval);
             }
             
-            // 2. Trigger the very first load instantly
             fetchSnapshot(true);
             
-            // 3. Start the 10-second (10000ms) repeating loop
             previewInterval = setInterval(() => {
                 fetchSnapshot(false);
             }, 10000);
@@ -357,7 +373,9 @@
                                 badge.className = 'badge'; 
                                 if (status === 'UP') {
                                     badge.classList.add('bg-success');
-                                } else if (status.includes('DOWN') || status.includes('UNREACHABLE')) {
+                                } else if (status.includes('Silenced')) {
+                                    badge.classList.add('bg-warning', 'text-dark');
+                                } else if (status.includes('DOWN') || status.includes('UNREACHABLE') || status.includes('ERR')) {
                                     badge.classList.add('bg-danger');
                                 } else {
                                     badge.classList.add('bg-secondary');
