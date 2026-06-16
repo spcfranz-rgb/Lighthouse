@@ -12,7 +12,13 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key') 
+app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key')
+# Force cookies to be sent only over HTTPS (Set to False ONLY if testing without SSL)
+app.config['SESSION_COOKIE_SECURE'] = False
+# Prevent JavaScript from accessing the session cookie
+app.config['SESSION_COOKIE_HTTPONLY'] = True 
+# Prevent the browser from sending the cookie with cross-site requests
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 DB_PATH = '/app/data/cctv.db'
 
 # ==========================================
