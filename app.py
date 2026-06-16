@@ -309,6 +309,89 @@ def delete_user(id):
     conn.close()
     return redirect(url_for('index'))
 
+# ==========================================
+# WEB UI TUNNELING (REVERSE PROXY)
+# ==========================================
+def proxy_request(device_type, device_id, req_path, method, headers, data, cookies):
+    conn = get_db()
+    if device_type == 'switch':
+        device = conn.execute("SELECT ip FROM switches WHERE id = ?", (device_id,)).fetchone()
+    elif device_type == 'camera':
+        device = conn.execute("SELECT ip FROM cameras WHERE id = ?", (device_id,)).fetchone()
+    else:
+        return "Invalid device type", 404
+    conn.close()
+
+    if not device:
+        return "Device not found", 404
+
+    # Reconstruct the query string (e.g., ?action=login)
+    query_string = request.query_string.decode('utf-8')
+    full_req_path = f"{req_path}?{query_string}" if query_string else req_path
+    
+    target_url = f"http://{device['ip']}/{full_req_path.lstrip('/')}"
+    
+    # Clean headers to prevent proxy loops or hostname mismatches
+    clean_headers = {k: v for k, v in headers if k.lower() not in ['host', 'origin', 'referer', 'accept-encoding']}
+    
+    try:
+        # stream=True ensures large files don't crash the container RAM
+        resp = requests.request(
+            method=method,
+            url=target_url,
+            headers=clean_headers,
+            data=data,
+            cookies=cookies,
+            allow_redirects=False,
+            stream=True,
+            timeout=15
+        )
+        
+        # Remove hop-by-hop headers
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        resp_headers = [(name, value) for (name, value) in resp.raw.headers.items()
+                        if name.lower() not in excluded_headers]
+        
+        # Rewrite the Location header so redirects stay inside our tunnel
+        for i, (name, value) in enumerate(resp_headers):
+            if name.lower() == 'location':
+                if value.startswith(f"http://{device['ip']}"):
+                    value = value.replace(f"http://{device['ip']}", f"/tunnel/{device_type}/{device_id}")
+                elif value.startswith('/'):
+                    value = f"/tunnel/{device_type}/{device_id}{value}"
+                resp_headers[i] = (name, value)
+
+        return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
+    except requests.exceptions.RequestException as e:
+        return f"Tunnel Error connecting to {device['ip']}: {str(e)}", 502
+
+@app.route('/tunnel/<device_type>/<int:device_id>/', defaults={'req_path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/tunnel/<device_type>/<int:device_id>/<path:req_path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@login_required
+def tunnel(device_type, device_id, req_path):
+    return proxy_request(device_type, device_id, req_path, request.method, request.headers, request.get_data(), request.cookies)
+
+@app.errorhandler(404)
+def proxy_absolute_paths(e):
+    """
+    Magic Referer Hack: Catches absolute path requests from legacy UIs 
+    and securely proxies them to the correct device.
+    """
+    if not current_user.is_authenticated:
+        return "404 - Not Found", 404
+
+    referer = request.headers.get('Referer')
+    if referer:
+        parsed_referer = urlparse(referer)
+        parts = parsed_referer.path.split('/')
+        # Identify if the user is currently viewing a tunnel page
+        if len(parts) >= 4 and parts[1] == 'tunnel':
+            device_type = parts[2]
+            device_id = parts[3]
+            return proxy_request(device_type, device_id, request.path, request.method, request.headers, request.get_data(), request.cookies)
+    
+    return "404 - Not Found", 404
+
 if __name__ == '__main__':
     init_db()
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
