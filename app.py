@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import threading
 import requests
+import ipaddress
 import paho.mqtt.client as mqtt
 from urllib.parse import urlparse
 from functools import wraps
@@ -12,14 +13,15 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key')
-# Force cookies to be sent only over HTTPS (Set to False ONLY if testing without SSL)
-app.config['SESSION_COOKIE_SECURE'] = False
-# Prevent JavaScript from accessing the session cookie
+
+# --- SECURITY HARDENING: SESSIONS ---
+app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key') 
+# Prevent JavaScript from accessing the session cookie (XSS Protection)
 app.config['SESSION_COOKIE_HTTPONLY'] = True 
-# Prevent the browser from sending the cookie with cross-site requests
+# Prevent browser from sending the cookie with cross-site requests (CSRF Protection)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-DB_PATH = '/app/data/cctv.db'
+# Force HTTPS cookies ONLY if explicitly enabled in .env
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').lower() == 'true'
 
 # ==========================================
 # AUTHENTICATION SETUP
@@ -27,6 +29,7 @@ DB_PATH = '/app/data/cctv.db'
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
+DB_PATH = '/app/data/cctv.db'
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -80,7 +83,6 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, role TEXT
     )""")
     
-    # Defaults from .env file
     cursor.execute("SELECT count(*) FROM settings")
     if cursor.fetchone()[0] == 0:
         settings = [
@@ -257,12 +259,10 @@ def test_alert():
     
     try:
         client = mqtt.Client("camera_monitor_test")
-        client.connect(broker, port, 5) # 5-second timeout
-        
+        client.connect(broker, port, 5)
         test_topic = f"{prefix}/test_device/ping"
         client.publish(test_topic, 0, retain=False)
         client.disconnect()
-        
         flash(f'Success! Test alert sent to {test_topic}', 'success')
     except Exception as e:
         flash(f'MQTT Error: Could not reach broker at {broker}:{port}. ({str(e)})', 'danger')
@@ -419,6 +419,15 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
     if not device:
         return "Device not found", 404
 
+    # --- SECURITY HARDENING: SSRF PROTECTION ---
+    try:
+        ip_obj = ipaddress.ip_address(device['ip'])
+        # Ensure the requested IP is strictly a private, local network IP
+        if not ip_obj.is_private or ip_obj.is_loopback:
+             return "Security Policy Violation: Target IP is not a valid local device.", 403
+    except ValueError:
+        return "Invalid IP Address format.", 400
+
     query_string = request.query_string.decode('utf-8')
     full_req_path = f"{req_path}?{query_string}" if query_string else req_path
     target_url = f"http://{device['ip']}/{full_req_path.lstrip('/')}"
@@ -468,7 +477,10 @@ def proxy_absolute_paths(e):
     return "404 - Not Found", 404
 
 if __name__ == '__main__':
+    # Initialize the DB and Background tasks
     init_db()
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     monitor_thread.start()
+    
+    # We leave this here so you can still run `python app.py` locally if not using Docker
     app.run(host='0.0.0.0', port=5000, debug=False)
