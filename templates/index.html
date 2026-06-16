@@ -38,4 +38,157 @@
                                 </td>
                                 {% if current_user.role == 'admin' %}
                                 <td class="text-end text-nowrap">
-                                    <a href="/edit_
+                                    <a href="/edit_switch/{{ s.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
+                                    <a href="/delete_switch/{{ s.id }}" class="btn btn-outline-danger btn-sm">X</a>
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    
+                    {% if current_user.role == 'admin' %}
+                    <hr>
+                    <h6>Add Switch</h6>
+                    <form action="/add_switch" method="POST">
+                        <input type="text" name="name" class="form-control mb-2" placeholder="Switch Name" required>
+                        <input type="text" name="ip" class="form-control mb-2" placeholder="IP Address" required>
+                        <button type="submit" class="btn btn-primary btn-sm w-100">Add Switch</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if current_user.role == 'admin' %}
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">Global Settings</h5></div>
+                <div class="card-body bg-body-tertiary">
+                    <form action="/update_settings" method="POST">
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-0">MQTT Broker IP</label>
+                            <input type="text" name="mqtt_broker" class="form-control form-control-sm" value="{{ settings.mqtt_broker }}" required>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-0">MQTT Port</label>
+                            <input type="number" name="mqtt_port" class="form-control form-control-sm" value="{{ settings.mqtt_port }}" required>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small text-muted mb-0">MQTT Topic Prefix</label>
+                            <input type="text" name="mqtt_prefix" class="form-control form-control-sm" value="{{ settings.mqtt_prefix }}" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small text-muted mb-0">Check Interval (Sec)</label>
+                            <input type="number" name="check_interval" class="form-control form-control-sm" value="{{ settings.check_interval }}" required>
+                        </div>
+                        <button type="submit" class="btn btn-warning btn-sm w-100">Save Settings</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header"><h5 class="mb-0">User Management</h5></div>
+                <div class="card-body">
+                    <table class="table table-sm align-middle">
+                        <thead><tr><th>Username</th><th>Role</th><th></th></tr></thead>
+                        <tbody>
+                            {% for u in users %}
+                            <tr>
+                                <td>{{ u.username }}</td>
+                                <td>{{ u.role }}</td>
+                                <td class="text-end">
+                                    {% if u.id != current_user.id %}
+                                    <a href="/delete_user/{{ u.id }}" class="btn btn-outline-danger btn-sm">X</a>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    <hr>
+                    <form action="/add_user" method="POST" class="row gx-1">
+                        <div class="col-4">
+                            <input type="text" name="username" class="form-control form-control-sm" placeholder="User" required>
+                        </div>
+                        <div class="col-4">
+                            <input type="password" name="password" class="form-control form-control-sm" placeholder="Pass" required>
+                        </div>
+                        <div class="col-4">
+                            <select name="role" class="form-select form-select-sm" required>
+                                <option value="user">User</option>
+                                <option value="admin">Admin</option>
+                            </select>
+                        </div>
+                        <div class="col-12 mt-2">
+                            <button type="submit" class="btn btn-secondary btn-sm w-100">Add User</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Cameras</h5></div>
+                <div class="card-body">
+                    <table class="table table-sm align-middle">
+                        <thead><tr><th>Name</th><th>IP</th><th>Switch</th><th>Status</th>{% if current_user.role == 'admin' %}<th></th>{% endif %}</tr></thead>
+                        <tbody>
+                            {% for c in cameras %}
+                            <tr>
+                                <td>{{ c.name }}</td>
+                                <td>
+                                    {{ c.ip }}
+                                    <a href="/tunnel/camera/{{ c.id }}/" target="_blank" class="badge bg-info text-decoration-none ms-2">WebUI</a>
+                                </td>
+                                <td>{{ c.switch_name }}</td>
+                                <td>
+                                    <span class="badge {% if c.status == 'UP' %}bg-success{% elif 'DOWN' in c.status or 'UNREACHABLE' in c.status %}bg-danger{% else %}bg-secondary{% endif %}">
+                                        {{ c.status }}
+                                    </span>
+                                </td>
+                                {% if current_user.role == 'admin' %}
+                                <td class="text-end text-nowrap">
+                                    <a href="/edit_camera/{{ c.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
+                                    <a href="/delete_camera/{{ c.id }}" class="btn btn-outline-danger btn-sm">X</a>
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+
+                    {% if current_user.role == 'admin' %}
+                    <hr>
+                    <h6>Add Camera</h6>
+                    <form action="/add_camera" method="POST" class="row gx-2">
+                        <div class="col-md-3 mb-2">
+                            <select name="switch_id" class="form-select" required>
+                                <option value="" disabled selected>Select Switch...</option>
+                                {% for s in switches %}
+                                <option value="{{ s.id }}">{{ s.name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2 mb-2">
+                            <input type="text" name="name" class="form-control" placeholder="Cam Name" required>
+                        </div>
+                        <div class="col-md-2 mb-2">
+                            <input type="text" name="ip" class="form-control" placeholder="IP Address" required>
+                        </div>
+                        <div class="col-md-4 mb-2">
+                            <input type="text" name="stream_url" class="form-control" placeholder="RTSP URL" required>
+                        </div>
+                        <div class="col-md-1 mb-2">
+                            <button type="submit" class="btn btn-primary w-100">+</button>
+                        </div>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
