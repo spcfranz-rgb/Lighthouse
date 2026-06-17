@@ -44,6 +44,10 @@ login_manager.login_view = 'login'
 DB_PATH = '/app/data/cctv.db'
 FORCE_CHECK_FLAG = '/app/data/force_check.flag'
 
+# NEW: A random, secure token generated every time the container starts
+import secrets
+INTERNAL_WEBHOOK_SECRET = secrets.token_hex(32)
+
 class User(UserMixin):
     def __init__(self, id, username, role):
         self.id = id
