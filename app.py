@@ -269,11 +269,12 @@ def monitor_loop():
                     cameras = cursor.fetchall()
                     camera_results = {}
                     
-                    with ThreadPoolExecutor(max_workers=20) as executor:
-                        futures = {executor.submit(threaded_camera_check, dict(cam)): cam for cam in cameras}
-                        for future in futures:
-                            c_id, cam_up, stream_ok, snap_bytes = future.result()
-                            camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                    pool = eventlet.greenpool.GreenPool(size=20)
+                    camera_results = {}
+                    
+                    # Native Eventlet concurrency mapped directly to your worker function
+                    for c_id, cam_up, stream_ok, snap_bytes in pool.imap(threaded_camera_check, [dict(c) for c in cameras]):
+                        camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
                     
                     for cam in cameras:
                         cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
@@ -327,11 +328,12 @@ def monitor_loop():
             standalone_cameras = cursor.fetchall()
             standalone_results = {}
             
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                futures = {executor.submit(threaded_camera_check, dict(cam)): cam for cam in standalone_cameras}
-                for future in futures:
-                    c_id, cam_up, stream_ok, snap_bytes = future.result()
-                    standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                    pool = eventlet.greenpool.GreenPool(size=20)
+                    camera_results = {}
+                    
+                    # Native Eventlet concurrency mapped directly to your worker function
+                    for c_id, cam_up, stream_ok, snap_bytes in pool.imap(threaded_camera_check, [dict(c) for c in cameras]):
+                        camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
                     
             for cam in standalone_cameras:
                 cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
