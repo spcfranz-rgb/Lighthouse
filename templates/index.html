@@ -361,13 +361,13 @@
         }
     </script>
 
-   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script>
         const socket = io();
         
         socket.on('state_change', function(data) {
-            // Determine if it is a switch or a camera based on the DB table name
-            const key = (data.type === 'switches' ? 'switch_' : 'camera_') + data.id;
+            // FIXED: Using hyphens to exactly match the HTML IDs
+            const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
             const badge = document.getElementById('status-' + key);
             
             if (badge) {
