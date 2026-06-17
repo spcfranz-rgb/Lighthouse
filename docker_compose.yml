@@ -1,15 +1,28 @@
 version: '3.8'
 
 services:
-  cctv-manager:
-    build: .
-    container_name: cctv-manager
+  cctv-dashboard:
+    # This tells Docker to pull and build directly from your GitHub repo!
+    # The '#main' at the end specifies which branch to build from.
+    build: https://github.com/spcfranz-rgb/CCTVMonitor-NOC.git#main
+    
+    container_name: cctv-dashboard
     restart: unless-stopped
     ports:
       - "5000:5000"
-    volumes:
-      - ./data:/app/data
+    
+    # Using environment variable interpolation here means Docker will 
+    # automatically look for a .env file sitting next to this docker-compose.yml
     environment:
-      - TZ=America/New_York
-    env_file:
-      - .env
+      - SECRET_KEY=${SECRET_KEY}
+      - COMPANY_LOGO_URL=${COMPANY_LOGO_URL}
+      - CUSTOMER_LOGO_URL=${CUSTOMER_LOGO_URL}
+      
+      # Uncomment these in your .env file to enable SSO
+      # - AUTHENTIK_URL=${AUTHENTIK_URL}
+      # - AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
+      # - AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}
+      
+    volumes:
+      # This binds the persistent database and logos to the host machine
+      - ./data:/app/data
