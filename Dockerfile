@@ -10,14 +10,14 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copy the requirements file and install dependencies
-# We append Gunicorn here so you don't have to manually edit requirements.txt
+# ADDED: ImageHash and Pillow for perceptual video freeze detection
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn==21.2.0
+RUN pip install --no-cache-dir -r requirements.txt gunicorn==21.2.0 ImageHash Pillow
 
 # Copy the rest of your application code into the container
 COPY . .
 
-# Sanitize the startup script (removes Windows line-endings if copy-pasted) and make it executable
+# Sanitize the startup script and make it executable
 RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
 # Expose the port the web GUI will run on
