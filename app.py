@@ -905,3 +905,17 @@ def proxy_absolute_paths(e):
         if len(parts) >= 4 and parts[1] == 'tunnel':
             return proxy_request(parts[2], parts[3], request.path, request.method, request.headers, request.get_data(), request.cookies)
     return "404 - Not Found", 404
+# ==========================================
+# APPLICATION STARTUP
+# ==========================================
+# Ensure the background monitoring loop is spawned exactly once when the server starts
+@app.before_first_request
+def start_background_threads():
+    # We use a dummy file flag to ensure Gunicorn doesn't spawn duplicate loops if workers restart
+    lock_file = '/app/data/monitor.lock'
+    if not os.path.exists(lock_file):
+        open(lock_file, 'w').close()
+        socketio.start_background_task(monitor_loop)
+
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=5000)
