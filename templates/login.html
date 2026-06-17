@@ -2,35 +2,42 @@
 <html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <title>CCTV Monitor - Login</title>
+    <title>Login - CCTV Monitor</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
-<body class="d-flex align-items-center py-4 bg-body-tertiary" style="height: 100vh;">
+<body class="container py-5 d-flex justify-content-center align-items-center" style="min-height: 100vh;">
 
-    <main class="form-signin w-100 m-auto" style="max-width: 330px;">
-        <form action="/login" method="POST">
-            <h1 class="h3 mb-3 fw-normal text-center">Please sign in</h1>
+    <div class="card w-100 shadow" style="max-width: 400px;">
+        <div class="card-header text-center">
+            <h4 class="mb-0 py-2">CCTV Dashboard</h4>
+        </div>
+        <div class="card-body p-4">
             
-            {% with messages = get_flashed_messages() %}
+            {% with messages = get_flashed_messages(with_categories=true) %}
               {% if messages %}
-                <div class="alert alert-danger py-2 text-center" role="alert">
-                  {{ messages[0] }}
-                </div>
+                {% for category, message in messages %}
+                  <div class="alert alert-{{ category }} alert-dismissible fade show small" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                  </div>
+                {% endfor %}
               {% endif %}
             {% endwith %}
 
-            <div class="form-floating mb-2">
-                <input type="text" name="username" class="form-control" id="floatingInput" placeholder="Username" required>
-                <label for="floatingInput">Username</label>
-            </div>
-            <div class="form-floating mb-3">
-                <input type="password" name="password" class="form-control" id="floatingPassword" placeholder="Password" required>
-                <label for="floatingPassword">Password</label>
-            </div>
+            <form action="/login" method="POST">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" required autofocus>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Secure Login</button>
+            </form>
+        </div>
+    </div>
 
-            <button class="btn btn-primary w-100 py-2" type="submit">Sign in</button>
-        </form>
-    </main>
-
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

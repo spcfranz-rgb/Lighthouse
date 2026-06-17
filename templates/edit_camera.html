@@ -7,36 +7,63 @@
 </head>
 <body class="container py-5 d-flex justify-content-center">
 
-    <div class="card w-100" style="max-width: 500px;">
+    <div class="card w-100" style="max-width: 600px;">
         <div class="card-header">
             <h5 class="mb-0">Edit Camera</h5>
         </div>
         <div class="card-body">
             <form action="/edit_camera/{{ camera.id }}" method="POST">
                 
-                <div class="mb-3">
-                    <label class="form-label text-muted">Parent Switch</label>
-                    <select name="switch_id" class="form-select" required>
-                        {% for s in switches %}
-                        <option value="{{ s.id }}" {% if s.id == camera.switch_id %}selected{% endif %}>
-                            {{ s.name }} ({{ s.ip }})
-                        </option>
-                        {% endfor %}
-                    </select>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">Parent Switch</label>
+                        <select name="switch_id" class="form-select">
+                            <option value="" {% if not camera.switch_id %}selected{% endif %}>None (Standalone)</option>
+                            {% for s in switches %}
+                            <option value="{{ s.id }}" {% if s.id == camera.switch_id %}selected{% endif %}>
+                                {{ s.name }} ({{ s.ip }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">Camera Manufacturer</label>
+                        <select name="manufacturer" class="form-select" required>
+                            <option value="Other" {% if camera.manufacturer == 'Other' %}selected{% endif %}>Other (FFmpeg RTSP)</option>
+                            <option value="Hanwha" {% if camera.manufacturer == 'Hanwha' %}selected{% endif %}>Hanwha / Wisenet</option>
+                            <option value="Hikvision" {% if camera.manufacturer == 'Hikvision' %}selected{% endif %}>Hikvision</option>
+                            <option value="Dahua" {% if camera.manufacturer == 'Dahua' %}selected{% endif %}>Dahua</option>
+                            <option value="Amcrest" {% if camera.manufacturer == 'Amcrest' %}selected{% endif %}>Amcrest</option>
+                            <option value="Axis" {% if camera.manufacturer == 'Axis' %}selected{% endif %}>Axis</option>
+                            <option value="Foscam" {% if camera.manufacturer == 'Foscam' %}selected{% endif %}>Foscam</option>
+                        </select>
+                    </div>
                 </div>
 
-                <div class="mb-3">
-                    <label class="form-label text-muted">Camera Name</label>
-                    <input type="text" name="name" class="form-control" value="{{ camera.name }}" required>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">Camera Name</label>
+                        <input type="text" name="name" class="form-control" value="{{ camera.name }}" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">IP Address</label>
+                        <input type="text" name="ip" class="form-control" value="{{ camera.ip }}" required>
+                    </div>
                 </div>
 
-                <div class="mb-3">
-                    <label class="form-label text-muted">IP Address</label>
-                    <input type="text" name="ip" class="form-control" value="{{ camera.ip }}" required>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">Camera Username</label>
+                        <input type="text" name="username" class="form-control" value="{{ camera.username }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label text-muted">Camera Password</label>
+                        <input type="password" name="password" class="form-control" value="{{ camera.password }}">
+                    </div>
                 </div>
 
                 <div class="mb-4">
-                    <label class="form-label text-muted">RTSP Stream URL</label>
+                    <label class="form-label text-muted">RTSP Stream URL <small>(Used for monitoring & fallback)</small></label>
                     <input type="text" name="stream_url" class="form-control" value="{{ camera.stream_url }}" required>
                 </div>
 

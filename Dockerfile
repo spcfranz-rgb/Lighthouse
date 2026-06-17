@@ -1,21 +1,27 @@
+# Use a lightweight Python base image
 FROM python:3.9-slim
 
-# Install system dependencies
+# Install system dependencies required for monitoring and media parsing
 RUN apt-get update && \
     apt-get install -y --no-install-recommends iputils-ping ffmpeg sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 
+# Set the working directory inside the container
 WORKDIR /app
 
-# Install Python dependencies and Gunicorn
+# Copy the requirements file and install dependencies
+# We append Gunicorn here so you don't have to manually edit requirements.txt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn==21.2.0
 
-# Copy the application code
+# Copy the rest of your application code into the container
 COPY . .
 
-# Expose web GUI port
+# Sanitize the startup script (removes Windows line-endings if copy-pasted) and make it executable
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
+
+# Expose the port the web GUI will run on
 EXPOSE 5000
 
-# Start Gunicorn server with 4 worker threads instead of Flask's dev server
-CMD ["gunicorn", "-w", "4", "--threads", "2", "-b", "0.0.0.0:5000", "app:app"]
+# Boot the container using our custom startup script
+CMD ["./start.sh"]
