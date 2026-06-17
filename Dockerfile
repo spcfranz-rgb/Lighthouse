@@ -2,8 +2,9 @@
 FROM python:3.9-slim
 
 # Install system dependencies required for monitoring and media parsing
+# CRITICAL FIX: Added 'traceroute' here!
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends iputils-ping ffmpeg sqlite3 && \
+    apt-get install -y --no-install-recommends iputils-ping ffmpeg sqlite3 traceroute && \
     rm -rf /var/lib/apt/lists/*
 
 # Set the working directory inside the container
