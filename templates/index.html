@@ -34,7 +34,7 @@
                 <div class="card-header"><h5 class="mb-0">Network Switches</h5></div>
                 <div class="card-body">
                     <table class="table table-sm align-middle">
-                        <thead><tr><th>Name</th><th>IP/Host</th><th>Status</th>{% if current_user.role == 'admin' %}<th></th>{% endif %}</tr></thead>
+                        <thead><tr><th>Name</th><th>IP/Host</th><th>Status</th>{% if current_user.role in ['admin', 'operator'] %}<th></th>{% endif %}</tr></thead>
                         <tbody>
                             {% for s in switches %}
                             <tr>
@@ -48,15 +48,18 @@
                                         {{ s.status }}
                                     </span>
                                 </td>
-                                {% if current_user.role == 'admin' %}
+                                {% if current_user.role in ['admin', 'operator'] %}
                                 <td class="text-end text-nowrap">
                                     {% if s.is_silenced %}
                                         <button class="btn btn-warning btn-sm" onclick="toggleSilence('switch', {{ s.id }}, 0)" title="Un-silence Device">🔔</button>
                                     {% else %}
                                         <button class="btn btn-outline-secondary btn-sm" onclick="toggleSilence('switch', {{ s.id }}, 24)" title="Silence Alerts (24h)">🔕</button>
                                     {% endif %}
+                                    
+                                    {% if current_user.role == 'admin' %}
                                     <a href="/edit_switch/{{ s.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
                                     <a href="/delete_switch/{{ s.id }}" class="btn btn-outline-danger btn-sm">X</a>
+                                    {% endif %}
                                 </td>
                                 {% endif %}
                             </tr>
@@ -113,7 +116,9 @@
                     </form>
                 </div>
             </div>
+            {% endif %}
 
+            {% if current_user.role in ['admin', 'operator'] %}
             <div class="card mb-4">
                 <div class="card-header"><h5 class="mb-0">Manual Diagnostic Tool</h5></div>
                 <div class="card-body">
@@ -130,7 +135,9 @@
                     <pre id="pingOutput" class="bg-black text-light p-2 rounded small d-none" style="max-height: 200px; overflow-y: auto; font-size: 0.75rem; white-space: pre-wrap;"></pre>
                 </div>
             </div>
-            
+            {% endif %}
+
+            {% if current_user.role in ['admin', 'operator'] %}
             <div class="card mb-4">
                 <div class="card-header"><h5 class="mb-0">WAN Speed Test</h5></div>
                 <div class="card-body">
@@ -163,7 +170,9 @@
                     <div id="speedtestError" class="alert alert-danger py-1 small mt-2 d-none"></div>
                 </div>
             </div>
-            
+            {% endif %}
+
+            {% if current_user.role == 'admin' %}
             <div class="card mb-4">
                 <div class="card-header"><h5 class="mb-0">User Management</h5></div>
                 <div class="card-body">
@@ -185,19 +194,20 @@
                     </table>
                     <hr>
                     <form action="/add_user" method="POST" class="row gx-1">
-                        <div class="col-4">
-                            <input type="text" name="username" class="form-control form-control-sm" placeholder="User" required>
+                        <div class="col-12 mb-2">
+                            <input type="text" name="username" class="form-control form-control-sm" placeholder="Username" required>
                         </div>
-                        <div class="col-4">
-                            <input type="password" name="password" class="form-control form-control-sm" placeholder="Pass" required>
+                        <div class="col-6 mb-2">
+                            <input type="password" name="password" class="form-control form-control-sm" placeholder="Password" required>
                         </div>
-                        <div class="col-4">
+                        <div class="col-6 mb-2">
                             <select name="role" class="form-select form-select-sm" required>
-                                <option value="user">User</option>
-                                <option value="admin">Admin</option>
+                                <option value="user">Viewer Only</option>
+                                <option value="operator">Operator (Diagnostics)</option>
+                                <option value="admin">Admin (Full Config)</option>
                             </select>
                         </div>
-                        <div class="col-12 mt-2">
+                        <div class="col-12">
                             <button type="submit" class="btn btn-secondary btn-sm w-100">Add User</button>
                         </div>
                     </form>
@@ -212,7 +222,7 @@
                 <div class="card-header"><h5 class="mb-0">Cameras</h5></div>
                 <div class="card-body">
                     <table class="table table-sm align-middle">
-                        <thead><tr><th>Name</th><th>IP/Host</th><th>Switch</th><th>Status</th>{% if current_user.role == 'admin' %}<th></th>{% endif %}</tr></thead>
+                        <thead><tr><th>Name</th><th>IP/Host</th><th>Switch</th><th>Status</th>{% if current_user.role in ['admin', 'operator'] %}<th></th>{% endif %}</tr></thead>
                         <tbody>
                             {% for c in cameras %}
                             <tr>
@@ -230,15 +240,18 @@
                                         {{ c.status }}
                                     </span>
                                 </td>
-                                {% if current_user.role == 'admin' %}
+                                {% if current_user.role in ['admin', 'operator'] %}
                                 <td class="text-end text-nowrap">
                                     {% if c.is_silenced %}
                                         <button class="btn btn-warning btn-sm" onclick="toggleSilence('camera', {{ c.id }}, 0)" title="Un-silence Device">🔔</button>
                                     {% else %}
                                         <button class="btn btn-outline-secondary btn-sm" onclick="toggleSilence('camera', {{ c.id }}, 24)" title="Silence Alerts (24h)">🔕</button>
                                     {% endif %}
+                                    
+                                    {% if current_user.role == 'admin' %}
                                     <a href="/edit_camera/{{ c.id }}" class="btn btn-outline-warning btn-sm">Edit</a>
                                     <a href="/delete_camera/{{ c.id }}" class="btn btn-outline-danger btn-sm">X</a>
+                                    {% endif %}
                                 </td>
                                 {% endif %}
                             </tr>
@@ -315,6 +328,7 @@
       </div>
     </div>
 
+    {% if current_user.role == 'admin' %}
     <div class="modal fade" id="importModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog">
         <div class="modal-content">
@@ -324,12 +338,10 @@
           </div>
           <form action="/import_config" method="POST" enctype="multipart/form-data">
               <div class="modal-body">
-                
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <p class="small text-muted mb-0">Upload a <code>.csv</code> configuration file.</p>
                     <a href="/download_template" class="btn btn-sm btn-outline-info py-0">Download Template</a>
                 </div>
-
                 <div class="alert alert-warning py-2 small">
                     <strong>Note:</strong> This is a non-destructive merge. Existing devices with the exact same name will be updated. New devices will be added. No devices will be deleted.
                 </div>
@@ -343,6 +355,7 @@
         </div>
       </div>
     </div>
+    {% endif %}
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
@@ -370,35 +383,26 @@
 
         function showPreview(id, name) {
             currentPreviewId = id;
-            
             if (!modalInstance) {
                 modalInstance = new bootstrap.Modal(document.getElementById('previewModal'));
                 document.getElementById('previewModal').addEventListener('hidden.bs.modal', function () {
-                    if (previewInterval) {
-                        clearInterval(previewInterval);
-                        previewInterval = null;
-                    }
+                    if (previewInterval) { clearInterval(previewInterval); previewInterval = null; }
                 });
             }
-            
             document.getElementById('previewModalLabel').innerText = 'Live Preview: ' + name;
-            
             const img = document.getElementById('previewImage');
             const spinner = document.getElementById('previewSpinner');
             
             function fetchSnapshot(isFirstLoad = false) {
                 const timestamp = new Date().getTime();
                 const newSrc = '/snapshot/' + currentPreviewId + '?t=' + timestamp;
-                
                 if (isFirstLoad) {
                     img.classList.add('d-none');
                     spinner.classList.remove('d-none');
                     img.src = newSrc;
                 } else {
                     const tempImg = new Image();
-                    tempImg.onload = function() {
-                        img.src = this.src;
-                    };
+                    tempImg.onload = function() { img.src = this.src; };
                     tempImg.src = newSrc;
                 }
             }
@@ -407,7 +411,6 @@
                 spinner.classList.add('d-none');
                 img.classList.remove('d-none');
             };
-            
             img.onerror = function() {
                 spinner.classList.add('d-none');
                 if (!previewInterval) {
@@ -416,16 +419,9 @@
                 }
             };
             
-            if (previewInterval) {
-                clearInterval(previewInterval);
-            }
-            
+            if (previewInterval) clearInterval(previewInterval);
             fetchSnapshot(true);
-            
-            previewInterval = setInterval(() => {
-                fetchSnapshot(false);
-            }, 10000);
-            
+            previewInterval = setInterval(() => { fetchSnapshot(false); }, 10000);
             modalInstance.show();
         }
     </script>
@@ -438,76 +434,41 @@
             const output = document.getElementById('pingOutput');
             const ip = ipInput.value.trim();
 
-            if (!ip) {
-                alert('Please enter an IP address.');
-                return;
-            }
+            if (!ip) { alert('Please enter an IP address.'); return; }
 
-            btn.disabled = true;
-            ipInput.disabled = true;
+            btn.disabled = true; ipInput.disabled = true;
             spinner.classList.remove('d-none');
-            output.classList.add('d-none');
-            output.textContent = '';
+            output.classList.add('d-none'); output.textContent = '';
 
-            const formData = new FormData();
-            formData.append('ip', ip);
+            const formData = new FormData(); formData.append('ip', ip);
 
             fetch('/api/ping', { method: 'POST', body: formData })
             .then(response => response.json())
             .then(data => {
                 output.textContent = data.output;
-                if (data.success) {
-                    output.classList.remove('text-danger');
-                    output.classList.add('text-success');
-                } else {
-                    output.classList.remove('text-success');
-                    output.classList.add('text-danger');
-                }
+                if (data.success) { output.classList.remove('text-danger'); output.classList.add('text-success'); } 
+                else { output.classList.remove('text-success'); output.classList.add('text-danger'); }
                 output.classList.remove('d-none');
             })
             .catch(error => {
                 output.textContent = 'Network Error: ' + error;
-                output.classList.remove('text-success');
-                output.classList.add('text-danger');
+                output.classList.remove('text-success'); output.classList.add('text-danger');
                 output.classList.remove('d-none');
             })
             .finally(() => {
-                btn.disabled = false;
-                ipInput.disabled = false;
-                spinner.classList.add('d-none');
+                btn.disabled = false; ipInput.disabled = false; spinner.classList.add('d-none');
             });
         }
         
-        document.getElementById("manualPingIp").addEventListener("keypress", function(event) {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                document.getElementById("manualPingBtn").click();
-            }
-        });
-    </script>
-
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <script>
-        const socket = io();
-        
-        socket.on('state_change', function(data) {
-            const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
-            const badge = document.getElementById('status-' + key);
-            
-            if (badge) {
-                badge.innerText = data.status;
-                badge.className = 'badge'; 
-                if (data.status === 'UP') {
-                    badge.classList.add('bg-success');
-                } else if (data.status.includes('Silenced')) {
-                    badge.classList.add('bg-warning', 'text-dark');
-                } else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) {
-                    badge.classList.add('bg-danger');
-                } else {
-                    badge.classList.add('bg-secondary');
+        const pingIpElement = document.getElementById("manualPingIp");
+        if (pingIpElement) {
+            pingIpElement.addEventListener("keypress", function(event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    document.getElementById("manualPingBtn").click();
                 }
-            }
-        });
+            });
+        }
     </script>
 
     <script>
@@ -525,9 +486,7 @@
             fetch('/api/speedtest', { method: 'POST' })
             .then(res => res.json())
             .then(data => {
-                if (data.status !== 'running') {
-                    throw new Error('Could not initialize test worker.');
-                }
+                if (data.status !== 'running') { throw new Error('Could not initialize test worker.'); }
             })
             .catch(err => {
                 errDiv.textContent = 'Execution Error: ' + err.message;
@@ -536,29 +495,48 @@
                 spinner.classList.add('d-none');
             });
         }
+    </script>
 
-        // Listen for async completion socket event from backend
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        
+        socket.on('state_change', function(data) {
+            const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
+            const badge = document.getElementById('status-' + key);
+            
+            if (badge) {
+                badge.innerText = data.status;
+                badge.className = 'badge'; 
+                if (data.status === 'UP') badge.classList.add('bg-success');
+                else if (data.status.includes('Silenced')) badge.classList.add('bg-warning', 'text-dark');
+                else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) badge.classList.add('bg-danger');
+                else badge.classList.add('bg-secondary');
+            }
+        });
+
         socket.on('speedtest_result', function(data) {
             const btn = document.getElementById('speedtestBtn');
             const spinner = document.getElementById('speedtestSpinner');
             const display = document.getElementById('speedtestDisplay');
             const errDiv = document.getElementById('speedtestError');
 
-            btn.disabled = false;
-            spinner.classList.add('d-none');
+            if (btn && spinner) {
+                btn.disabled = false;
+                spinner.classList.add('d-none');
 
-            if (data.success) {
-                document.getElementById('st-ping').innerText = data.ping;
-                document.getElementById('st-download').innerText = data.download;
-                document.getElementById('st-upload').innerText = data.upload;
-                document.getElementById('st-isp').innerText = data.isp;
-                display.classList.remove('d-none');
-            } else {
-                errDiv.textContent = 'Test Failed: ' + data.error;
-                errDiv.classList.remove('d-none');
+                if (data.success) {
+                    document.getElementById('st-ping').innerText = data.ping;
+                    document.getElementById('st-download').innerText = data.download;
+                    document.getElementById('st-upload').innerText = data.upload;
+                    document.getElementById('st-isp').innerText = data.isp;
+                    display.classList.remove('d-none');
+                } else {
+                    errDiv.textContent = 'Test Failed: ' + data.error;
+                    errDiv.classList.remove('d-none');
+                }
             }
         });
     </script>
-    
 </body>
 </html>
