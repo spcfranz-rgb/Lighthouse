@@ -1,15 +1,32 @@
 version: '3.8'
 
 services:
-  cctv-manager:
+  cctv-dashboard:
     build: .
-    container_name: cctv-manager
+    container_name: cctv-dashboard
     restart: unless-stopped
     ports:
       - "5000:5000"
-    volumes:
-      - ./data:/app/data
     environment:
-      - TZ=America/New_York
-    env_file:
-      - .env
+      # --- Security Settings ---
+      - SECRET_KEY=your-super-secure-flask-secret-key
+      
+      # --- Co-Branding Logos ---
+      # The app will download these once on boot and save them to /app/data/logos
+      - COMPANY_LOGO_URL=https://your-msp-domain.com/images/my-company-logo.png
+      - CUSTOMER_LOGO_URL=https://the-client-domain.com/images/their-logo.png
+      
+      # --- Optional Authentik SSO (Uncomment to enable) ---
+      # - AUTHENTIK_URL=https://sso.yourdomain.com
+      # - AUTHENTIK_CLIENT_ID=your-client-id
+      # - AUTHENTIK_CLIENT_SECRET=your-client-secret
+      
+    volumes:
+      # Maps your local ./data folder to the container's persistent storage
+      - ./data:/app/data
+
+    # Uncomment this DNS block ONLY if the container throws "Name or service not known" 
+    # errors when trying to download the logos or run Traceroute/Speedtests.
+    # dns:
+    #   - 8.8.8.8
+    #   - 1.1.1.1
