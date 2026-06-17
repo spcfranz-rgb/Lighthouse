@@ -93,6 +93,16 @@ def init_db():
         FOREIGN KEY(switch_id) REFERENCES switches(id)
     )""")
     
+    # NEW: Event Logs Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS event_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        device_type TEXT,
+        device_name TEXT,
+        status TEXT
+    )""")
+    
     try:
         cursor.execute("ALTER TABLE cameras ADD COLUMN manufacturer TEXT DEFAULT 'Other'")
         cursor.execute("ALTER TABLE cameras ADD COLUMN username TEXT DEFAULT ''")
@@ -209,6 +219,16 @@ def monitor_loop():
         try:
             conn = get_db()
             cursor = conn.cursor()
+            now = time.time()
+            
+            # Helper function to detect state changes and log them
+            def set_status(table, item_id, item_name, dev_type, old_status, new_status):
+                if old_status != new_status:
+                    # Ignore the initial "UNKNOWN -> State" jump on container boot
+                    if old_status != 'UNKNOWN':
+                        cursor.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)",
+                                       (now, dev_type, item_name, new_status))
+                    cursor.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (new_status, item_id))
             
             cursor.execute("SELECT key, value FROM settings")
             settings_dict = {row['key']: row['value'] for row in cursor.fetchall()}
@@ -226,7 +246,6 @@ def monitor_loop():
             # 1. PROCESS SWITCHES & THEIR ATTACHED CAMERAS
             cursor.execute("SELECT * FROM switches")
             switches = cursor.fetchall()
-            now = time.time()
             
             for switch in switches:
                 switch_id, switch_name, switch_ip, s_until = switch['id'], switch['name'], switch['ip'], switch['silenced_until']
@@ -237,7 +256,9 @@ def monitor_loop():
                 client.publish(f"{prefix}/{switch_name}/ping", switch_payload, retain=True)
                 
                 if is_up:
-                    cursor.execute("UPDATE switches SET status = ? WHERE id = ?", ('UP' if not silenced else 'UP (Silenced)', switch_id))
+                    new_s_stat = 'UP' if not silenced else 'UP (Silenced)'
+                    set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
+                    
                     cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
                     cameras = cursor.fetchall()
                     
@@ -272,29 +293,36 @@ def monitor_loop():
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
                                 if is_frozen:
-                                    cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('FROZEN (Silenced)', cam_id))
+                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
                                 else:
-                                    cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)', cam_id))
+                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                             else:
                                 client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                                 if is_frozen:
                                     client.publish(f"{prefix}/{cam_name}/stream", "FROZEN", retain=True)
-                                    cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Frozen)', cam_id))
+                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
                                 else:
                                     client.publish(f"{prefix}/{cam_name}/stream", "UP" if stream_ok else "STREAM_ERROR", retain=True)
-                                    cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP' if stream_ok else 'DOWN (Stream Error)', cam_id))
+                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
                         else:
                             if cam_silenced:
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                                cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Silenced)', cam_id))
+                                set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
                             else:
                                 client.publish(f"{prefix}/{cam_name}/ping", "OFFLINE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "OFFLINE", retain=True)
-                                cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Offline)', cam_id))
+                                set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
                 else:
-                    cursor.execute("UPDATE switches SET status = ? WHERE id = ?", ('DOWN' if not silenced else 'DOWN (Silenced)', switch_id))
-                    cursor.execute("UPDATE cameras SET status = ? WHERE switch_id = ?", ('UNREACHABLE (Switch Down)' if not silenced else 'UNREACHABLE (Silenced)', switch_id))
+                    new_s_stat = 'DOWN' if not silenced else 'DOWN (Silenced)'
+                    set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
+                    
+                    # Unreachable Cameras
+                    cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
+                    cameras = cursor.fetchall()
+                    for cam in cameras:
+                        new_c_stat = 'UNREACHABLE (Switch Down)' if not silenced else 'UNREACHABLE (Silenced)'
+                        set_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
             # 2. PROCESS STANDALONE CAMERAS
             cursor.execute("SELECT * FROM cameras WHERE switch_id IS NULL OR switch_id = ''")
@@ -330,26 +358,30 @@ def monitor_loop():
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
                         if is_frozen:
-                            cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('FROZEN (Silenced)', cam_id))
+                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
                         else:
-                            cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)', cam_id))
+                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                     else:
                         client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                         if is_frozen:
                             client.publish(f"{prefix}/{cam_name}/stream", "FROZEN", retain=True)
-                            cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Frozen)', cam_id))
+                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
                         else:
                             client.publish(f"{prefix}/{cam_name}/stream", "UP" if stream_ok else "STREAM_ERROR", retain=True)
-                            cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('UP' if stream_ok else 'DOWN (Stream Error)', cam_id))
+                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
                 else:
                     if cam_silenced:
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Silenced)', cam_id))
+                        set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
                     else:
                         client.publish(f"{prefix}/{cam_name}/ping", "OFFLINE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "OFFLINE", retain=True)
-                        cursor.execute("UPDATE cameras SET status = ? WHERE id = ?", ('DOWN (Offline)', cam_id))
+                        set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
+
+            # 3. AUTO-PRUNE OLD LOGS (Older than 7 Days)
+            seven_days_ago = time.time() - (7 * 24 * 3600)
+            cursor.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
 
             conn.commit()
             conn.close()
@@ -360,7 +392,7 @@ def monitor_loop():
             time.sleep(10)
             continue
             
-        # 3. INTERRUPTIBLE SLEEP CYCLE
+        # 4. INTERRUPTIBLE SLEEP CYCLE
         for _ in range(interval):
             if os.path.exists(FORCE_CHECK_FLAG):
                 try:
@@ -418,6 +450,15 @@ def index():
     conn.close()
     
     return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users)
+
+@app.route('/history')
+@login_required
+def history():
+    conn = get_db()
+    # Fetch the 500 most recent event logs
+    logs = conn.execute("SELECT * FROM event_logs ORDER BY timestamp DESC LIMIT 500").fetchall()
+    conn.close()
+    return render_template('history.html', logs=logs)
 
 @app.route('/api/status')
 @login_required
@@ -528,7 +569,6 @@ def add_switch():
         flash('Error: A switch with that name already exists.', 'danger')
     finally:
         conn.close()
-        
     return redirect(url_for('index'))
 
 @app.route('/edit_switch/<int:id>', methods=['GET', 'POST'])
@@ -587,7 +627,6 @@ def add_camera():
         flash('Error: A camera with that name already exists.', 'danger')
     finally:
         conn.close()
-        
     return redirect(url_for('index'))
 
 @app.route('/edit_camera/<int:id>', methods=['GET', 'POST'])
@@ -696,13 +735,10 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
     if not device:
         return "Device not found", 404
 
-    # --- SECURITY HARDENING: SSRF PROTECTION (Updated for Domains) ---
     try:
-        # Resolve the domain to an IP address first
         resolved_ip = socket.gethostbyname(device['ip'])
         ip_obj = ipaddress.ip_address(resolved_ip)
         
-        # Block public internet IPs and localhost routing
         if not ip_obj.is_private or ip_obj.is_loopback:
              return "Security Policy Violation: Target domain resolves to a non-local or restricted IP.", 403
              
