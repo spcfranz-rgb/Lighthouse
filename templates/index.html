@@ -126,12 +126,10 @@
                         <input type="text" id="manualPingIp" class="form-control form-control-sm" placeholder="IP Address (e.g. 192.168.1.5)">
                         <button class="btn btn-outline-info btn-sm" type="button" id="manualPingBtn" onclick="runManualPing()">Ping</button>
                     </div>
-                    
                     <div id="pingSpinner" class="text-center d-none mb-2">
                         <div class="spinner-border spinner-border-sm text-info" role="status"></div>
                         <span class="ms-2 small text-muted">Sending 4 packets...</span>
                     </div>
-                    
                     <pre id="pingOutput" class="bg-black text-light p-2 rounded small d-none" style="max-height: 200px; overflow-y: auto; font-size: 0.75rem; white-space: pre-wrap;"></pre>
                 </div>
             </div>
@@ -142,30 +140,16 @@
                 <div class="card-header"><h5 class="mb-0">WAN Speed Test</h5></div>
                 <div class="card-body">
                     <p class="small text-muted mb-3">Test the external internet connection speed of the gateway system.</p>
-                    
                     <div id="speedtestDisplay" class="row text-center mb-3 d-none">
-                        <div class="col-4 border-end">
-                            <small class="text-muted d-block">Ping</small>
-                            <strong id="st-ping" class="text-info">-</strong>
-                        </div>
-                        <div class="col-4 border-end">
-                            <small class="text-muted d-block">Download</small>
-                            <strong id="st-download" class="text-success">-</strong>
-                        </div>
-                        <div class="col-4">
-                            <small class="text-muted d-block">Upload</small>
-                            <strong id="st-upload" class="text-warning">-</strong>
-                        </div>
-                        <div class="col-12 mt-2">
-                            <small class="text-muted small">ISP: <span id="st-isp" class="fw-bold text-light">-</span></small>
-                        </div>
+                        <div class="col-4 border-end"><small class="text-muted d-block">Ping</small><strong id="st-ping" class="text-info">-</strong></div>
+                        <div class="col-4 border-end"><small class="text-muted d-block">Download</small><strong id="st-download" class="text-success">-</strong></div>
+                        <div class="col-4"><small class="text-muted d-block">Upload</small><strong id="st-upload" class="text-warning">-</strong></div>
+                        <div class="col-12 mt-2"><small class="text-muted small">ISP: <span id="st-isp" class="fw-bold text-light">-</span></small></div>
                     </div>
-
                     <div id="speedtestSpinner" class="text-center d-none mb-3">
                         <div class="spinner-border spinner-border-sm text-warning" role="status"></div>
                         <span class="ms-2 small text-muted">Running network benchmarks (takes ~30s)...</span>
                     </div>
-
                     <button class="btn btn-outline-warning btn-sm w-100" type="button" id="speedtestBtn" onclick="runSpeedTest()">Run Speed Test</button>
                     <div id="speedtestError" class="alert alert-danger py-1 small mt-2 d-none"></div>
                 </div>
@@ -194,12 +178,8 @@
                     </table>
                     <hr>
                     <form action="/add_user" method="POST" class="row gx-1">
-                        <div class="col-12 mb-2">
-                            <input type="text" name="username" class="form-control form-control-sm" placeholder="Username" required>
-                        </div>
-                        <div class="col-6 mb-2">
-                            <input type="password" name="password" class="form-control form-control-sm" placeholder="Password" required>
-                        </div>
+                        <div class="col-12 mb-2"><input type="text" name="username" class="form-control form-control-sm" placeholder="Username" required></div>
+                        <div class="col-6 mb-2"><input type="password" name="password" class="form-control form-control-sm" placeholder="Password" required></div>
                         <div class="col-6 mb-2">
                             <select name="role" class="form-select form-select-sm" required>
                                 <option value="user">Viewer Only</option>
@@ -207,9 +187,7 @@
                                 <option value="admin">Admin (Full Config)</option>
                             </select>
                         </div>
-                        <div class="col-12">
-                            <button type="submit" class="btn btn-secondary btn-sm w-100">Add User</button>
-                        </div>
+                        <div class="col-12"><button type="submit" class="btn btn-secondary btn-sm w-100">Add User</button></div>
                     </form>
                 </div>
             </div>
@@ -263,7 +241,6 @@
                     <hr>
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h6 class="mb-0">Add Camera</h6>
-                        
                         <div class="dropdown">
                             <button class="btn btn-outline-info btn-sm dropdown-toggle py-0" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
                                 Auto-Discover
@@ -274,14 +251,11 @@
                                     <input type="text" id="scanSubnetInput" class="form-control" placeholder="192.168.1.0/24" value="192.168.1.0/24">
                                     <button class="btn btn-primary" type="button" id="scanSubnetBtn" onclick="runNetworkScan()">Scan</button>
                                 </div>
-                                
                                 <div id="scanSpinner" class="text-center d-none mb-2">
                                     <div class="spinner-border spinner-border-sm text-info" role="status"></div>
                                     <span class="ms-2 small text-muted">Sweeping subnet...</span>
                                 </div>
-                                
                                 <div id="scanResults" class="small mt-2"></div>
-                                
                                 <div id="bulkAddOptions" class="d-none mt-3 pt-2 border-top">
                                     <label class="form-label small fw-bold mb-1">Mass-Add Selected</label>
                                     <select id="bulkMfg" class="form-select form-select-sm mb-1">
@@ -298,7 +272,45 @@
                                 </div>
                             </div>
                         </div>
-                        {% endif %}
+                    </div>
+
+                    <form action="/add_camera" method="POST">
+                        <div class="row gx-2 mb-2">
+                            <div class="col-md-3">
+                                <select name="switch_id" class="form-select form-select-sm">
+                                    <option value="" selected>None (Standalone)</option>
+                                    {% for s in switches %}
+                                    <option value="{{ s.id }}">{{ s.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-3"><input type="text" name="name" class="form-control form-control-sm" placeholder="Cam Name" required></div>
+                            <div class="col-md-3"><input type="text" name="ip" class="form-control form-control-sm" placeholder="IP / Hostname" required></div>
+                            <div class="col-md-3">
+                                <select name="manufacturer" class="form-select form-select-sm" required>
+                                    <option value="Other">Other (FFmpeg RTSP)</option>
+                                    <option value="Hanwha">Hanwha / Wisenet</option>
+                                    <option value="Hikvision">Hikvision</option>
+                                    <option value="Dahua">Dahua</option>
+                                    <option value="Amcrest">Amcrest</option>
+                                    <option value="Axis">Axis</option>
+                                    <option value="Foscam">Foscam</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="row gx-2">
+                            <div class="col-md-3"><input type="text" name="username" class="form-control form-control-sm" placeholder="Camera User"></div>
+                            <div class="col-md-3"><input type="password" name="password" class="form-control form-control-sm" placeholder="Camera Pass"></div>
+                            <div class="col-md-5"><input type="text" name="stream_url" class="form-control form-control-sm" placeholder="RTSP URL (Fallback/Monitor)" required></div>
+                            <div class="col-md-1"><button type="submit" class="btn btn-primary btn-sm w-100">+</button></div>
+                        </div>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal fade" id="previewModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
@@ -348,23 +360,16 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
     <script>
+        // Silencing Script
         function toggleSilence(type, id, hours) {
             const formData = new FormData();
             formData.append('hours', hours);
-            fetch('/toggle_silence/' + type + '/' + id, {
-                method: 'POST',
-                body: formData
-            })
+            fetch('/toggle_silence/' + type + '/' + id, { method: 'POST', body: formData })
             .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    location.reload();
-                }
-            });
+            .then(data => { if (data.success) { location.reload(); } });
         }
-    </script>
 
-    <script>
+        // Snapshot Preview Script
         let modalInstance;
         let previewInterval;
         let currentPreviewId;
@@ -385,26 +390,17 @@
                 const timestamp = new Date().getTime();
                 const newSrc = '/snapshot/' + currentPreviewId + '?t=' + timestamp;
                 if (isFirstLoad) {
-                    img.classList.add('d-none');
-                    spinner.classList.remove('d-none');
-                    img.src = newSrc;
+                    img.classList.add('d-none'); spinner.classList.remove('d-none'); img.src = newSrc;
                 } else {
                     const tempImg = new Image();
-                    tempImg.onload = function() { img.src = this.src; };
-                    tempImg.src = newSrc;
+                    tempImg.onload = function() { img.src = this.src; }; tempImg.src = newSrc;
                 }
             }
 
-            img.onload = function() {
-                spinner.classList.add('d-none');
-                img.classList.remove('d-none');
-            };
+            img.onload = function() { spinner.classList.add('d-none'); img.classList.remove('d-none'); };
             img.onerror = function() {
                 spinner.classList.add('d-none');
-                if (!previewInterval) {
-                    alert('Failed to load snapshot. The camera might be offline, or credentials are invalid.');
-                    modalInstance.hide();
-                }
+                if (!previewInterval) { alert('Failed to load snapshot.'); modalInstance.hide(); }
             };
             
             if (previewInterval) clearInterval(previewInterval);
@@ -412,9 +408,8 @@
             previewInterval = setInterval(() => { fetchSnapshot(false); }, 10000);
             modalInstance.show();
         }
-    </script>
 
-    <script>
+        // Manual Ping Script
         function runManualPing() {
             const ipInput = document.getElementById('manualPingIp');
             const btn = document.getElementById('manualPingBtn');
@@ -423,13 +418,10 @@
             const ip = ipInput.value.trim();
 
             if (!ip) { alert('Please enter an IP address.'); return; }
-
             btn.disabled = true; ipInput.disabled = true;
-            spinner.classList.remove('d-none');
-            output.classList.add('d-none'); output.textContent = '';
+            spinner.classList.remove('d-none'); output.classList.add('d-none'); output.textContent = '';
 
             const formData = new FormData(); formData.append('ip', ip);
-
             fetch('/api/ping', { method: 'POST', body: formData })
             .then(response => response.json())
             .then(data => {
@@ -443,91 +435,36 @@
                 output.classList.remove('text-success'); output.classList.add('text-danger');
                 output.classList.remove('d-none');
             })
-            .finally(() => {
-                btn.disabled = false; ipInput.disabled = false; spinner.classList.add('d-none');
-            });
+            .finally(() => { btn.disabled = false; ipInput.disabled = false; spinner.classList.add('d-none'); });
         }
         
         const pingIpElement = document.getElementById("manualPingIp");
         if (pingIpElement) {
             pingIpElement.addEventListener("keypress", function(event) {
-                if (event.key === "Enter") {
-                    event.preventDefault();
-                    document.getElementById("manualPingBtn").click();
-                }
+                if (event.key === "Enter") { event.preventDefault(); document.getElementById("manualPingBtn").click(); }
             });
         }
-    </script>
 
-    <script>
+        // Speed Test Script
         function runSpeedTest() {
             const btn = document.getElementById('speedtestBtn');
             const spinner = document.getElementById('speedtestSpinner');
             const display = document.getElementById('speedtestDisplay');
             const errDiv = document.getElementById('speedtestError');
 
-            btn.disabled = true;
-            spinner.classList.remove('d-none');
-            errDiv.classList.add('d-none');
-            display.classList.add('d-none');
+            btn.disabled = true; spinner.classList.remove('d-none');
+            errDiv.classList.add('d-none'); display.classList.add('d-none');
 
             fetch('/api/speedtest', { method: 'POST' })
             .then(res => res.json())
-            .then(data => {
-                if (data.status !== 'running') { throw new Error('Could not initialize test worker.'); }
-            })
+            .then(data => { if (data.status !== 'running') { throw new Error('Could not initialize test worker.'); } })
             .catch(err => {
-                errDiv.textContent = 'Execution Error: ' + err.message;
-                errDiv.classList.remove('d-none');
-                btn.disabled = false;
-                spinner.classList.add('d-none');
+                errDiv.textContent = 'Execution Error: ' + err.message; errDiv.classList.remove('d-none');
+                btn.disabled = false; spinner.classList.add('d-none');
             });
         }
-    </script>
 
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <script>
-        const socket = io();
-        
-        socket.on('state_change', function(data) {
-            const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
-            const badge = document.getElementById('status-' + key);
-            
-            if (badge) {
-                badge.innerText = data.status;
-                badge.className = 'badge'; 
-                if (data.status === 'UP') badge.classList.add('bg-success');
-                else if (data.status.includes('Silenced')) badge.classList.add('bg-warning', 'text-dark');
-                else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) badge.classList.add('bg-danger');
-                else badge.classList.add('bg-secondary');
-            }
-        });
-
-        socket.on('speedtest_result', function(data) {
-            const btn = document.getElementById('speedtestBtn');
-            const spinner = document.getElementById('speedtestSpinner');
-            const display = document.getElementById('speedtestDisplay');
-            const errDiv = document.getElementById('speedtestError');
-
-            if (btn && spinner) {
-                btn.disabled = false;
-                spinner.classList.add('d-none');
-
-                if (data.success) {
-                    document.getElementById('st-ping').innerText = data.ping;
-                    document.getElementById('st-download').innerText = data.download;
-                    document.getElementById('st-upload').innerText = data.upload;
-                    document.getElementById('st-isp').innerText = data.isp;
-                    display.classList.remove('d-none');
-                } else {
-                    errDiv.textContent = 'Test Failed: ' + data.error;
-                    errDiv.classList.remove('d-none');
-                }
-            }
-        });
-    </script>
-
-    <script>
+        // Network Scanner & Mass Add Logic
         function toggleAllCheckboxes(state) {
             document.querySelectorAll('.bulk-ip-check').forEach(chk => chk.checked = state);
         }
@@ -542,30 +479,21 @@
             const subnet = input.value.trim();
             if (!subnet) return;
 
-            btn.disabled = true;
-            spinner.classList.remove('d-none');
-            resultsDiv.innerHTML = '';
-            bulkOptions.classList.add('d-none');
+            btn.disabled = true; spinner.classList.remove('d-none');
+            resultsDiv.innerHTML = ''; bulkOptions.classList.add('d-none');
 
-            const formData = new FormData();
-            formData.append('subnet', subnet);
-
+            const formData = new FormData(); formData.append('subnet', subnet);
             fetch('/api/scan_network', { method: 'POST', body: formData })
             .then(res => res.json())
             .then(data => {
-                if (!data.success) {
-                    resultsDiv.innerHTML = `<span class="text-danger">${data.error}</span>`;
-                    return;
-                }
-
+                if (!data.success) { resultsDiv.innerHTML = `<span class="text-danger">${data.error}</span>`; return; }
                 if (data.discovered.length === 0) {
-                    resultsDiv.innerHTML = `<span class="text-muted">No new cameras found. (Found ${data.total_found} total, ${data.already_added} already in database).</span>`;
+                    resultsDiv.innerHTML = `<span class="text-muted">No new cameras found. (Found ${data.total_found} total, ${data.already_added} already managed).</span>`;
                     return;
                 }
 
-                // Render checkboxes + clickable IP text
                 let html = `<div class="alert alert-success py-1 mb-2 px-2 text-center">Found ${data.discovered.length} new devices!</div>
-                <div class="mb-1 text-end"><a href="#" class="text-decoration-none me-2" onclick="toggleAllCheckboxes(true)">Select All</a> <a href="#" class="text-decoration-none text-secondary" onclick="toggleAllCheckboxes(false)">None</a></div>
+                <div class="mb-1 text-end"><a href="javascript:void(0)" class="text-decoration-none me-2" onclick="toggleAllCheckboxes(true)">Select All</a> <a href="javascript:void(0)" class="text-decoration-none text-secondary" onclick="toggleAllCheckboxes(false)">None</a></div>
                 <ul class="list-group list-group-flush border rounded mb-2" style="max-height: 150px; overflow-y: auto;">`;
                 
                 data.discovered.forEach(ip => {
@@ -576,68 +504,72 @@
                 });
                 
                 html += `</ul><small class="text-muted mt-1 d-block lh-sm" style="font-size: 0.7rem;">Check boxes to mass-add, or click a blue IP to drop it into the manual form below.</small>`;
-                
-                resultsDiv.innerHTML = html;
-                bulkOptions.classList.remove('d-none'); // Reveal the Mass Add button
+                resultsDiv.innerHTML = html; bulkOptions.classList.remove('d-none');
             })
-            .catch(err => {
-                resultsDiv.innerHTML = `<span class="text-danger">Network Error: ${err.message}</span>`;
-            })
-            .finally(() => {
-                btn.disabled = false;
-                spinner.classList.add('d-none');
-            });
+            .catch(err => { resultsDiv.innerHTML = `<span class="text-danger">Network Error: ${err.message}</span>`; })
+            .finally(() => { btn.disabled = false; spinner.classList.add('d-none'); });
         }
 
         function submitBulkAdd() {
             const btn = document.getElementById('submitBulkBtn');
             const checkboxes = document.querySelectorAll('.bulk-ip-check:checked');
-            
-            if (checkboxes.length === 0) {
-                alert("Please check at least one IP address to mass-add.");
-                return;
-            }
+            if (checkboxes.length === 0) { alert("Please check at least one IP address to mass-add."); return; }
 
             const ips = Array.from(checkboxes).map(chk => chk.value);
             const mfg = document.getElementById('bulkMfg').value;
             const user = document.getElementById('bulkUser').value.trim();
             const pass = document.getElementById('bulkPass').value;
-            
-            // Grab the currently selected switch ID from the manual form so they attach to the correct parent!
             const switchId = document.querySelector('select[name="switch_id"]').value;
 
-            btn.disabled = true;
-            btn.innerText = "Processing...";
+            btn.disabled = true; btn.innerText = "Processing...";
 
             fetch('/api/add_cameras_bulk', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ips: ips,
-                    manufacturer: mfg,
-                    username: user,
-                    password: pass,
-                    switch_id: switchId
-                })
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ips: ips, manufacturer: mfg, username: user, password: pass, switch_id: switchId })
             })
             .then(res => res.json())
             .then(data => {
-                if (data.success) {
-                    alert(`Successfully added ${data.added} cameras!`);
-                    location.reload(); // Refresh the page to see the new cameras instantly
-                } else {
-                    alert(`Error: ${data.error}`);
-                    btn.disabled = false;
-                    btn.innerText = "Add Checked Cameras";
-                }
+                if (data.success) { alert(`Successfully added ${data.added} cameras!`); location.reload(); } 
+                else { alert(`Error: ${data.error}`); btn.disabled = false; btn.innerText = "Add Checked Cameras"; }
             })
-            .catch(err => {
-                alert(`Network Error: ${err.message}`);
-                btn.disabled = false;
-                btn.innerText = "Add Checked Cameras";
-            });
+            .catch(err => { alert(`Network Error: ${err.message}`); btn.disabled = false; btn.innerText = "Add Checked Cameras"; });
         }
     </script>
-                    
+
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        
+        socket.on('state_change', function(data) {
+            const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
+            const badge = document.getElementById('status-' + key);
+            if (badge) {
+                badge.innerText = data.status; badge.className = 'badge'; 
+                if (data.status === 'UP') badge.classList.add('bg-success');
+                else if (data.status.includes('Silenced')) badge.classList.add('bg-warning', 'text-dark');
+                else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) badge.classList.add('bg-danger');
+                else badge.classList.add('bg-secondary');
+            }
+        });
+
+        socket.on('speedtest_result', function(data) {
+            const btn = document.getElementById('speedtestBtn');
+            const spinner = document.getElementById('speedtestSpinner');
+            const display = document.getElementById('speedtestDisplay');
+            const errDiv = document.getElementById('speedtestError');
+            if (btn && spinner) {
+                btn.disabled = false; spinner.classList.add('d-none');
+                if (data.success) {
+                    document.getElementById('st-ping').innerText = data.ping;
+                    document.getElementById('st-download').innerText = data.download;
+                    document.getElementById('st-upload').innerText = data.upload;
+                    document.getElementById('st-isp').innerText = data.isp;
+                    display.classList.remove('d-none');
+                } else {
+                    errDiv.textContent = 'Test Failed: ' + data.error; errDiv.classList.remove('d-none');
+                }
+            }
+        });
+    </script>
 </body>
 </html>
