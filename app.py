@@ -1,3 +1,7 @@
+# CRITICAL: Monkey patching must occur before ANY other imports to make standard libraries async-compatible
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import time
 import socket
@@ -7,6 +11,8 @@ import threading
 import io
 import csv
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 import ipaddress
 import paho.mqtt.client as mqtt
@@ -19,18 +25,22 @@ from flask import Flask, render_template, request, redirect, url_for, abort, fla
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO
 
 app = Flask(__name__)
 
 # Tell Flask it is behind a reverse proxy (NGINX)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Initialize WebSockets
+# Initialize WebSockets with the eventlet async worker
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- SECURITY HARDENING: SESSIONS ---
-app.secret_key = os.environ.get('SECRET_KEY', 'cctv-super-secret-key') 
+app.secret_key = os.environ.get('SECRET_KEY')
+if not app.secret_key:
+    print("WARNING: SECRET_KEY environment variable is missing. Using insecure development key.")
+    app.secret_key = 'cctv-super-secret-key-change-me'
+    
 app.config['SESSION_COOKIE_HTTPONLY'] = True 
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').lower() == 'true'
@@ -43,10 +53,6 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 DB_PATH = '/app/data/cctv.db'
 FORCE_CHECK_FLAG = '/app/data/force_check.flag'
-
-# NEW: A random, secure token generated every time the container starts
-import secrets
-INTERNAL_WEBHOOK_SECRET = secrets.token_hex(32)
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -72,6 +78,7 @@ def admin_required(f):
     return decorated_function
 
 def trigger_monitor_check():
+    """Drops an IPC flag to immediately wake up the background monitor process."""
     try:
         open(FORCE_CHECK_FLAG, 'w').close()
     except Exception:
@@ -81,7 +88,11 @@ def trigger_monitor_check():
 # DATABASE INITIALIZATION
 # ==========================================
 def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;") # Enable Write-Ahead Logging for concurrency
+    except sqlite3.OperationalError:
+        pass
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -133,9 +144,10 @@ def init_db():
 
     conn.commit()
     conn.close()
+    print("Database initialized.")
 
 # ==========================================
-# BACKGROUND MONITORING TASK
+# BACKGROUND MONITORING & NETWORK TASKS
 # ==========================================
 def is_pingable(target):
     response = subprocess.call(['ping', '-c', '1', '-W', '2', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -188,11 +200,21 @@ def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
             return process.stdout
     except Exception:
         pass
-        
     return None
 
+def threaded_camera_check(cam):
+    """Worker function to check network status concurrently without blocking."""
+    cam_up = is_pingable(cam['ip']) or is_port_open(cam['ip'], 554) or is_port_open(cam['ip'], 80)
+    stream_ok = False
+    snap_bytes = None
+    if cam_up:
+        stream_ok = is_stream_active(cam['stream_url'])
+        if stream_ok:
+            snap_bytes = get_snapshot_bytes(cam['ip'], cam['manufacturer'], cam['username'], cam['password'], cam['stream_url'])
+    return cam['id'], cam_up, stream_ok, snap_bytes
+
 def monitor_loop():
-    print("Starting background monitoring thread...")
+    print("Starting concurrent background monitoring thread...")
     previous_hashes = {} 
     
     while True:
@@ -207,22 +229,11 @@ def monitor_loop():
                         cursor.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)", (now, dev_type, item_name, new_status))
                     cursor.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (new_status, item_id))
                     
-                    # ZERO-LATENCY PUSH: Hit the internal webhook to emit WebSocket event
-                    try:
-                        requests.post('http://127.0.0.1:5000/internal_emit', json={
-                            'secret': INTERNAL_WEBHOOK_SECRET, # <--- Added Secret Token
-                            'event': 'state_change',
-                            'data': {
-                                'type': table,
-                                'id': item_id,
-                                'name': item_name,
-                                'status': new_status,
-                                'device_type': dev_type,
-                                'timestamp': now
-                            }
-                        }, timeout=2)
-                    except Exception as e:
-                        print(f"Failed to push socket update: {e}")
+                    # Direct, zero-latency dispatch to connected WebSockets
+                    socketio.emit('state_change', {
+                        'type': table, 'id': item_id, 'name': item_name,
+                        'status': new_status, 'device_type': dev_type, 'timestamp': now
+                    })
             
             cursor.execute("SELECT key, value FROM settings")
             settings_dict = {row['key']: row['value'] for row in cursor.fetchall()}
@@ -254,39 +265,35 @@ def monitor_loop():
                     cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
                     cameras = cursor.fetchall()
                     
+                    # Concurrently fetch network data for all cameras on this switch
+                    camera_results = {}
+                    with ThreadPoolExecutor(max_workers=20) as executor:
+                        futures = {executor.submit(threaded_camera_check, dict(cam)): cam for cam in cameras}
+                        for future in futures:
+                            c_id, cam_up, stream_ok, snap_bytes = future.result()
+                            camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                    
                     for cam in cameras:
-                        cam_id, cam_name, cam_ip, stream_url, c_until = cam['id'], cam['name'], cam['ip'], cam['stream_url'], cam['silenced_until']
-                        mfg, user, pwd = cam['manufacturer'], cam['username'], cam['password']
-                        cam_silenced = c_until > now
-                        
-                        cam_up = is_pingable(cam_ip) or is_port_open(cam_ip, 554) or is_port_open(cam_ip, 80)
+                        cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
+                        cam_up, stream_ok, snap_bytes = camera_results[cam_id]
+                        is_frozen = False
                         
                         if cam_up:
-                            stream_ok = is_stream_active(stream_url)
-                            is_frozen = False
-                            
-                            if stream_ok:
-                                snap_bytes = get_snapshot_bytes(cam_ip, mfg, user, pwd, stream_url)
-                                if snap_bytes:
-                                    try:
-                                        img = Image.open(io.BytesIO(snap_bytes))
-                                        current_hash = imagehash.average_hash(img)
-                                        last_hash = previous_hashes.get(cam_id)
-                                        
-                                        if last_hash is not None and (current_hash - last_hash) <= 2:
-                                            is_frozen = True
-                                            
-                                        previous_hashes[cam_id] = current_hash
-                                    except Exception:
-                                        pass
+                            if stream_ok and snap_bytes:
+                                try:
+                                    img = Image.open(io.BytesIO(snap_bytes))
+                                    current_hash = imagehash.average_hash(img)
+                                    last_hash = previous_hashes.get(cam_id)
+                                    if last_hash is not None and (current_hash - last_hash) <= 2:
+                                        is_frozen = True
+                                    previous_hashes[cam_id] = current_hash
+                                except Exception: pass
                             
                             if cam_silenced:
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                                if is_frozen:
-                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
-                                else:
-                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
+                                if is_frozen: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
+                                else: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                             else:
                                 client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                                 if is_frozen:
@@ -317,39 +324,36 @@ def monitor_loop():
             # 2. PROCESS STANDALONE CAMERAS
             cursor.execute("SELECT * FROM cameras WHERE switch_id IS NULL OR switch_id = ''")
             standalone_cameras = cursor.fetchall()
+            
+            # Concurrently fetch network data for standalone cameras
+            standalone_results = {}
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                futures = {executor.submit(threaded_camera_check, dict(cam)): cam for cam in standalone_cameras}
+                for future in futures:
+                    c_id, cam_up, stream_ok, snap_bytes = future.result()
+                    standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                    
             for cam in standalone_cameras:
-                cam_id, cam_name, cam_ip, stream_url, c_until = cam['id'], cam['name'], cam['ip'], cam['stream_url'], cam['silenced_until']
-                mfg, user, pwd = cam['manufacturer'], cam['username'], cam['password']
-                cam_silenced = c_until > now
-                
-                cam_up = is_pingable(cam_ip) or is_port_open(cam_ip, 554) or is_port_open(cam_ip, 80)
+                cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
+                cam_up, stream_ok, snap_bytes = standalone_results[cam_id]
+                is_frozen = False
                 
                 if cam_up:
-                    stream_ok = is_stream_active(stream_url)
-                    is_frozen = False
-                    
-                    if stream_ok:
-                        snap_bytes = get_snapshot_bytes(cam_ip, mfg, user, pwd, stream_url)
-                        if snap_bytes:
-                            try:
-                                img = Image.open(io.BytesIO(snap_bytes))
-                                current_hash = imagehash.average_hash(img)
-                                last_hash = previous_hashes.get(cam_id)
-                                
-                                if last_hash is not None and (current_hash - last_hash) <= 2:
-                                    is_frozen = True
-                                    
-                                previous_hashes[cam_id] = current_hash
-                            except Exception:
-                                pass
+                    if stream_ok and snap_bytes:
+                        try:
+                            img = Image.open(io.BytesIO(snap_bytes))
+                            current_hash = imagehash.average_hash(img)
+                            last_hash = previous_hashes.get(cam_id)
+                            if last_hash is not None and (current_hash - last_hash) <= 2:
+                                is_frozen = True
+                            previous_hashes[cam_id] = current_hash
+                        except Exception: pass
                             
                     if cam_silenced:
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                        if is_frozen:
-                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
-                        else:
-                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
+                        if is_frozen: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
+                        else: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                     else:
                         client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                         if is_frozen:
@@ -388,19 +392,6 @@ def monitor_loop():
                 except OSError: pass
                 break
             time.sleep(1)
-
-# ==========================================
-# INTERNAL WEBHOOK (For Zero-Latency Pushes)
-# ==========================================
-@app.route('/internal_emit', methods=['POST'])
-def internal_emit():
-    # FIXED: Rely on the secure token instead of NGINX-mangled IP addresses
-    payload = request.json
-    if not payload or payload.get('secret') != INTERNAL_WEBHOOK_SECRET:
-        abort(403)
-        
-    socketio.emit(payload['event'], payload['data'])
-    return "OK", 200
 
 # ==========================================
 # FLASK WEB ROUTES
@@ -459,6 +450,14 @@ def history():
     conn.close()
     return render_template('history.html', logs=logs)
 
+@app.route('/api/logs')
+@login_required
+def api_logs():
+    conn = get_db()
+    logs = conn.execute("SELECT * FROM event_logs ORDER BY timestamp DESC LIMIT 500").fetchall()
+    conn.close()
+    return jsonify([dict(row) for row in logs])
+
 @app.route('/export_logs')
 @login_required
 def export_logs():
@@ -475,6 +474,22 @@ def export_logs():
         
     output = si.getvalue()
     return Response(output, mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=cctv_event_logs.csv"})
+
+@app.route('/api/status')
+@login_required
+def api_status():
+    conn = get_db()
+    switches = conn.execute("SELECT id, status FROM switches").fetchall()
+    cameras = conn.execute("SELECT id, status FROM cameras").fetchall()
+    conn.close()
+    
+    status_data = {}
+    for s in switches:
+        status_data[f"switch_{s['id']}"] = s['status']
+    for c in cameras:
+        status_data[f"camera_{c['id']}"] = c['status']
+        
+    return jsonify(status_data)
 
 @app.route('/toggle_silence/<device_type>/<int:id>', methods=['POST'])
 @login_required
@@ -711,8 +726,13 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
 
     query_string = request.query_string.decode('utf-8')
     full_req_path = f"{req_path}?{query_string}" if query_string else req_path
-    target_url = f"http://{device['ip']}/{full_req_path.lstrip('/')}"
+    
+    # SECURITY FIX: Construct the URL using the validated resolved IP, NOT the raw input domain
+    target_url = f"http://{resolved_ip}/{full_req_path.lstrip('/')}"
     clean_headers = {k: v for k, v in headers if k.lower() not in ['host', 'origin', 'referer', 'accept-encoding']}
+    
+    # Inject the original Host header so the end device accepts the connection if it relies on vhosts
+    clean_headers['Host'] = device['ip']
     
     try:
         resp = requests.request(method=method, url=target_url, headers=clean_headers, data=data, cookies=cookies, allow_redirects=False, stream=True, timeout=15)
@@ -721,6 +741,7 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
         for i, (name, value) in enumerate(resp_headers):
             if name.lower() == 'location':
                 if value.startswith(f"http://{device['ip']}"): value = value.replace(f"http://{device['ip']}", f"/tunnel/{device_type}/{device_id}")
+                elif value.startswith(f"http://{resolved_ip}"): value = value.replace(f"http://{resolved_ip}", f"/tunnel/{device_type}/{device_id}")
                 elif value.startswith('/'): value = f"/tunnel/{device_type}/{device_id}{value}"
                 resp_headers[i] = (name, value)
         return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
