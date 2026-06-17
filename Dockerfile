@@ -12,7 +12,7 @@ WORKDIR /app
 # Copy the requirements file and install dependencies
 # ADDED: ImageHash and Pillow for perceptual video freeze detection
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn==21.2.0 ImageHash Pillow Flask-SocketIO eventlet
+RUN pip install --no-cache-dir -r requirements.txt gunicorn==21.2.0 ImageHash Pillow Flask-SocketIO eventlet Authlib
 
 # Copy the rest of your application code into the container
 COPY . .
