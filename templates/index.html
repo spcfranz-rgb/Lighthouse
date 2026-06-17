@@ -361,33 +361,32 @@
         }
     </script>
 
+   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script>
-        function updateStatuses() {
-            fetch('/api/status')
-                .then(response => response.json())
-                .then(data => {
-                    for (const [key, status] of Object.entries(data)) {
-                        const badge = document.getElementById('status-' + key);
-                        if (badge) {
-                            if (badge.innerText.trim() !== status) {
-                                badge.innerText = status;
-                                badge.className = 'badge'; 
-                                if (status === 'UP') {
-                                    badge.classList.add('bg-success');
-                                } else if (status.includes('Silenced')) {
-                                    badge.classList.add('bg-warning', 'text-dark');
-                                } else if (status.includes('DOWN') || status.includes('UNREACHABLE') || status.includes('ERR') || status.includes('Frozen')) {
-                                    badge.classList.add('bg-danger');
-                                } else {
-                                    badge.classList.add('bg-secondary');
-                                }
-                            }
-                        }
-                    }
-                })
-                .catch(error => console.error('Error fetching live status:', error));
-        }
-        setInterval(updateStatuses, 2500);
+        const socket = io();
+        
+        socket.on('state_change', function(data) {
+            // Determine if it is a switch or a camera based on the DB table name
+            const key = (data.type === 'switches' ? 'switch_' : 'camera_') + data.id;
+            const badge = document.getElementById('status-' + key);
+            
+            if (badge) {
+                // Instantly update the text
+                badge.innerText = data.status;
+                
+                // Instantly update the color logic
+                badge.className = 'badge'; 
+                if (data.status === 'UP') {
+                    badge.classList.add('bg-success');
+                } else if (data.status.includes('Silenced')) {
+                    badge.classList.add('bg-warning', 'text-dark');
+                } else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) {
+                    badge.classList.add('bg-danger');
+                } else {
+                    badge.classList.add('bg-secondary');
+                }
+            }
+        });
     </script>
 
     <script>
