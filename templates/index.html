@@ -509,5 +509,56 @@
             }
         });
     </script>
+
+    <script>
+        function runSpeedTest() {
+            const btn = document.getElementById('speedtestBtn');
+            const spinner = document.getElementById('speedtestSpinner');
+            const display = document.getElementById('speedtestDisplay');
+            const errDiv = document.getElementById('speedtestError');
+
+            btn.disabled = true;
+            spinner.classList.remove('d-none');
+            errDiv.classList.add('d-none');
+            display.classList.add('d-none');
+
+            fetch('/api/speedtest', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'running') {
+                    throw new Error('Could not initialize test worker.');
+                }
+            })
+            .catch(err => {
+                errDiv.textContent = 'Execution Error: ' + err.message;
+                errDiv.classList.remove('d-none');
+                btn.disabled = false;
+                spinner.classList.add('d-none');
+            });
+        }
+
+        // Listen for async completion socket event from backend
+        socket.on('speedtest_result', function(data) {
+            const btn = document.getElementById('speedtestBtn');
+            const spinner = document.getElementById('speedtestSpinner');
+            const display = document.getElementById('speedtestDisplay');
+            const errDiv = document.getElementById('speedtestError');
+
+            btn.disabled = false;
+            spinner.classList.add('d-none');
+
+            if (data.success) {
+                document.getElementById('st-ping').innerText = data.ping;
+                document.getElementById('st-download').innerText = data.download;
+                document.getElementById('st-upload').innerText = data.upload;
+                document.getElementById('st-isp').innerText = data.isp;
+                display.classList.remove('d-none');
+            } else {
+                errDiv.textContent = 'Test Failed: ' + data.error;
+                errDiv.classList.remove('d-none');
+            }
+        });
+    </script>
+    
 </body>
 </html>
