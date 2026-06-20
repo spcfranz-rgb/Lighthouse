@@ -127,19 +127,11 @@
             {% endif %}
 
             {% if current_user.role in ['admin', 'operator'] %}
-            <div class="card mb-4">
-                <div class="card-header"><h5 class="mb-0">Manual Diagnostic Tool</h5></div>
-                <div class="card-body">
-                        <div class="input-group mb-2">
+            <div class="card-body">
+                        <div class="input-group mb-3">
                             <input type="text" id="diagIp" class="form-control form-control-sm" placeholder="IP or Hostname (e.g. 192.168.1.5)">
                             <button class="btn btn-outline-info btn-sm" type="button" id="pingBtn" onclick="runPing()">Ping</button>
-                            <button class="btn btn-danger btn-sm d-none" type="button" id="stopPingBtn" onclick="stopContinuousPing()">Stop Ping</button>
                             <button class="btn btn-outline-warning btn-sm" type="button" id="traceBtn" onclick="runTrace()">Trace</button>
-                        </div>
-                        
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" id="continuousPingCheck" role="switch">
-                            <label class="form-check-label small text-muted mt-1" for="continuousPingCheck">Continuous Stream</label>
                         </div>
                         
                         <div id="diagSpinner" class="text-center d-none mb-2">
@@ -148,7 +140,6 @@
                         </div>
                         
                         <pre id="diagOutput" class="bg-black text-light p-2 rounded small d-none" style="max-height: 250px; overflow-y: auto; font-size: 0.75rem; white-space: pre-wrap;"></pre>
-                </div>
             </div>
             {% endif %}
 
@@ -430,12 +421,10 @@
         function runPing() {
             const ipInput = document.getElementById('diagIp');
             const pBtn = document.getElementById('pingBtn');
-            const sBtn = document.getElementById('stopPingBtn');
             const tBtn = document.getElementById('traceBtn');
             const spinner = document.getElementById('diagSpinner');
             const spinnerText = document.getElementById('diagSpinnerText');
             const output = document.getElementById('diagOutput');
-            const isContinuous = document.getElementById('continuousPingCheck').checked;
             const ip = ipInput.value.trim();
 
             if (!ip) { alert('Please enter an IP address or Hostname.'); return; }
@@ -445,51 +434,35 @@
             output.textContent = '';
             output.classList.add('text-light');
 
-            if (isContinuous) {
-                // --- CONTINUOUS PING (WebSockets) ---
-                pBtn.classList.add('d-none');
-                sBtn.classList.remove('d-none');
-                tBtn.disabled = true;
-                ipInput.disabled = true;
-                spinnerText.innerText = 'Pinging continuously...';
-                spinner.classList.remove('d-none');
-                
-                socket.emit('start_continuous_ping', {ip: ip});
-            } else {
-                // --- STANDARD 4-PACKET PING (AJAX Fetch) ---
-                pBtn.disabled = true; tBtn.disabled = true; ipInput.disabled = true;
-                spinnerText.innerText = 'Sending 4 packets...';
-                spinner.classList.remove('d-none');
+            // Lock UI and show spinner
+            pBtn.disabled = true; 
+            tBtn.disabled = true; 
+            ipInput.disabled = true;
+            spinnerText.innerText = 'Sending 4 packets...';
+            spinner.classList.remove('d-none');
 
-                const formData = new FormData(); formData.append('ip', ip);
+            const formData = new FormData(); 
+            formData.append('ip', ip);
 
-                fetch('/api/ping', { method: 'POST', body: formData })
-                .then(response => response.json())
-                .then(data => {
-                    output.textContent = data.output;
-                    if (data.success) { output.classList.replace('text-light', 'text-success'); } 
-                    else { output.classList.replace('text-light', 'text-danger'); }
-                })
-                .catch(error => {
-                    output.textContent = 'Network Error: ' + error;
-                    output.classList.replace('text-light', 'text-danger');
-                })
-                .finally(() => {
-                    pBtn.disabled = false; tBtn.disabled = false; ipInput.disabled = false; spinner.classList.add('d-none');
-                });
-            }
+            fetch('/api/ping', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                output.textContent = data.output;
+                if (data.success) { output.classList.replace('text-light', 'text-success'); } 
+                else { output.classList.replace('text-light', 'text-danger'); }
+            })
+            .catch(error => {
+                output.textContent = 'Network Error: ' + error;
+                output.classList.replace('text-light', 'text-danger');
+            })
+            .finally(() => {
+                resetPingUI();
+            });
         }
 
-        // Stop Continuous Ping Button Logic
-        function stopContinuousPing() {
-            socket.emit('stop_continuous_ping');
-            resetPingUI();
-        }
-
-        // Reset UI when ping stops or finishes
+        // Reset UI when ping/trace stops or finishes
         function resetPingUI() {
-            document.getElementById('pingBtn').classList.remove('d-none');
-            document.getElementById('stopPingBtn').classList.add('d-none');
+            document.getElementById('pingBtn').disabled = false;
             document.getElementById('traceBtn').disabled = false;
             document.getElementById('diagIp').disabled = false;
             document.getElementById('diagSpinner').classList.add('d-none');
@@ -640,18 +613,6 @@
                 else if (data.status.includes('DOWN') || data.status.includes('UNREACHABLE') || data.status.includes('ERR') || data.status.includes('Frozen')) badge.classList.add('bg-danger');
                 else badge.classList.add('bg-secondary');
             }
-        });
-
-        // Listeners for the WebSocket Stream (Continuous Ping)
-        socket.on('ping_output', function(data) {
-            const output = document.getElementById('diagOutput');
-            output.textContent += data.line;
-            // Auto-scroll to the bottom as new lines come in
-            output.scrollTop = output.scrollHeight; 
-        });
-
-        socket.on('ping_stopped', function() {
-            resetPingUI();
         });
 
         socket.on('traceroute_result', function(data) {
