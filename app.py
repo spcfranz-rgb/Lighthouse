@@ -729,6 +729,59 @@ def manual_ping():
     except subprocess.TimeoutExpired: return jsonify({'success': False, 'output': 'Ping command timed out.'})
     except Exception as e: return jsonify({'success': False, 'output': str(e)})
 
+# --- GLOBAL DICT FOR CONTINUOUS PINGS ---
+active_pings = {}
+
+@socketio.on('start_continuous_ping')
+def handle_start_ping(data):
+    if not current_user.is_authenticated or current_user.role not in ['admin', 'operator']:
+        return
+
+    ip = data.get('ip')
+    sid = request.sid
+    if not ip: return
+
+    # Terminate any existing ping for this specific user session
+    if sid in active_pings:
+        active_pings[sid].terminate()
+
+    def ping_runner():
+        try:
+            # Launch standard continuous ping (no -c flag)
+            process = subprocess.Popen(['ping', ip], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            active_pings[sid] = process
+            
+            # Read the output line-by-line as it generates
+            for line in iter(process.stdout.readline, ''):
+                if not line: break
+                socketio.emit('ping_output', {'line': line}, room=sid)
+                
+            process.stdout.close()
+        except Exception as e:
+            socketio.emit('ping_output', {'line': f"Error: {str(e)}\n"}, room=sid)
+        finally:
+            if sid in active_pings:
+                del active_pings[sid]
+            socketio.emit('ping_stopped', room=sid)
+
+    # Spawn the isolated background thread
+    socketio.start_background_task(ping_runner)
+
+@socketio.on('stop_continuous_ping')
+def handle_stop_ping():
+    sid = request.sid
+    if sid in active_pings:
+        active_pings[sid].terminate()
+        del active_pings[sid]
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    # Crucial Memory Management: Kill the ping if the user closes the browser tab
+    sid = request.sid
+    if sid in active_pings:
+        active_pings[sid].terminate()
+        del active_pings[sid]
+
 @app.route('/api/traceroute', methods=['POST'])
 @login_required
 @operator_required
