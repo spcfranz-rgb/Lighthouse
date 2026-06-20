@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # --- The Built-In MQTT Broker ---
   mqtt-broker:
