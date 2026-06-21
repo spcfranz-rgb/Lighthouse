@@ -14,30 +14,28 @@ services:
     build: https://github.com/spcfranz-rgb/CCTVMonitor-NOC.git#test
     container_name: cctv-dashboard
     restart: unless-stopped
+    
+    # 1. Force the container to run as standard user UID 1000 (instead of root 0)
+    user: "1000:1000"
+    
+    # 2. Grant the specific kernel capability required for Ping/Traceroute
+    cap_add:
+      - NET_RAW
+      
     ports:
       - "5000:5000"
     environment:
-      # Application Secrets & Co-Branding
       - SECRET_KEY=${SECRET_KEY}
       - COMPANY_LOGO_URL=${COMPANY_LOGO_URL}
       - CUSTOMER_LOGO_URL=${CUSTOMER_LOGO_URL}
-      
-      # Internal MQTT Routing
       - DEFAULT_MQTT_BROKER=mqtt-broker
       - DEFAULT_MQTT_PORT=1883
-      
-      # Authentik SSO OIDC Parameters
       - AUTHENTIK_URL=${AUTHENTIK_URL}
       - AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
       - AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}
-      
     volumes:
-      # Persistent storage for logs, logos, and physical DB backups
       - ./data:/app/data
-      
     tmpfs:
-      # High-speed volatile RAM disk for active SQLite WAL processing
       - /app/data_ram
-      
     depends_on:
       - mqtt-broker
