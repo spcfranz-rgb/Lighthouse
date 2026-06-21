@@ -11,15 +11,10 @@ import threading
 import io
 import csv
 import json
-import io
-import csv
-import json
 import hashlib
 import base64
-import re  # <--- ADD THIS
-from datetime import datetime
-import hashlib
-import base64
+import re
+import shutil
 from datetime import datetime
 import eventlet.greenpool
 
@@ -149,8 +144,6 @@ def trigger_monitor_check():
 # ==========================================
 # DATABASE INITIALIZATION & RAM SYNC
 # ==========================================
-import shutil
-
 def init_ram_db():
     """Loads the physical database into RAM on container boot."""
     os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
@@ -234,9 +227,29 @@ def sync_db_loop():
             except Exception as e:
                 print(f"Failed to sync database to disk: {e}")
 
+def log_prune_loop():
+    """Background thread to safely prune old logs once a day."""
+    print("Starting daily database pruning thread...")
+    while True:
+        time.sleep(86400) # Sleep for 24 hours
+        try:
+            conn = get_db()
+            seven_days_ago = time.time() - (7 * 24 * 3600)
+            conn.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
+            conn.commit()
+            conn.close()
+            print("Successfully pruned logs older than 7 days.")
+        except Exception as e:
+            print(f"Failed to prune logs: {e}")
+
 # ==========================================
 # BACKGROUND MONITORING & NETWORK TASKS
 # ==========================================
+
+# --- CPU THROTTLE ---
+# Restrict CPU-heavy ffmpeg tasks to 2 concurrent threads to prevent ARM meltdown
+SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(2)
+
 def is_valid_target(target):
     """Sanitizes user input to prevent Argument Injection and DoS."""
     if not target:
@@ -256,12 +269,11 @@ def is_valid_target(target):
         pass
         
     # 3. Check if it is a valid Local or Public Hostname
-    # Strictly allows only Alphanumeric characters, periods, hyphens, and underscores.
-    # Instantly rejects spaces, semicolons, ampersands, and shell characters.
     if re.match(r'^[A-Za-z0-9_.-]+$', target):
         return True
         
     return False
+
 def is_pingable(target):
     response = subprocess.call(['ping', '-c', '1', '-W', '2', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return response == 0
@@ -313,7 +325,9 @@ def threaded_camera_check(cam):
     if cam_up:
         stream_ok = is_stream_active(cam['stream_url'])
         if stream_ok:
-            snap_bytes = get_snapshot_bytes(cam['ip'], cam['manufacturer'], cam['username'], cam['password'], cam['stream_url'])
+            # SECURE THE CPU: Threads must acquire this lock before decoding video
+            with SNAPSHOT_SEMAPHORE:
+                snap_bytes = get_snapshot_bytes(cam['ip'], cam['manufacturer'], cam['username'], cam['password'], cam['stream_url'])
     return cam['id'], cam_up, stream_ok, snap_bytes
 
 def monitor_loop():
@@ -486,10 +500,6 @@ def monitor_loop():
                         client.publish(f"{prefix}/{cam_name}/ping", "OFFLINE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "OFFLINE", retain=True)
                         set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
-
-            # AUTO-PRUNE OLD LOGS
-            seven_days_ago = time.time() - (7 * 24 * 3600)
-            cursor.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
 
             conn.commit()
             conn.close()
@@ -819,7 +829,7 @@ def toggle_silence(device_type, id):
 def manual_ping():
     ip = request.form.get('ip')
     
-    # --- SECURITY PATCH: Validate Input ---
+    # --- SECURITY PATCH: Validate Input to prevent Argument Injection ---
     if not is_valid_target(ip): 
         return jsonify({'success': False, 'output': 'Security Error: Invalid IP address or hostname format.'})
     
@@ -837,7 +847,7 @@ def manual_ping():
 def run_traceroute():
     target = request.form.get('target')
     
-    # --- SECURITY PATCH: Validate Input ---
+    # --- SECURITY PATCH: Validate Input to prevent Argument Injection ---
     if not is_valid_target(target): 
         return jsonify({'success': False, 'error': 'Security Error: Invalid IP address or hostname format.'})
 
@@ -1170,8 +1180,12 @@ try:
     lock_file = '/app/data_ram/monitor.lock'
     if not os.path.exists(lock_file):
         open(lock_file, 'w').close()
+        
+        # Spawn the completely isolated background workers
         socketio.start_background_task(monitor_loop)
         socketio.start_background_task(sync_db_loop)
+        socketio.start_background_task(log_prune_loop)
+        
 except Exception as e:
     print(f"Startup initialization error: {e}")
 
