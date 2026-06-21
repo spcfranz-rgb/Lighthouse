@@ -77,8 +77,9 @@ if AUTHENTIK_URL:
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
-DB_PATH = '/app/data/cctv.db'
-FORCE_CHECK_FLAG = '/app/data/force_check.flag'
+DB_PATH_DISK = '/app/data/cctv.db'        # Persistent SD Card Storage
+DB_PATH_RAM = '/app/data_ram/cctv.db'     # High-Speed RAM Storage
+FORCE_CHECK_FLAG = '/app/data_ram/force_check.flag'
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -116,16 +117,31 @@ def trigger_monitor_check():
 # ==========================================
 # DATABASE INITIALIZATION
 # ==========================================
+# ==========================================
+# DATABASE INITIALIZATION & RAM SYNC
+# ==========================================
+import shutil
+
+def init_ram_db():
+    """Loads the physical database into RAM on container boot."""
+    os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH_DISK), exist_ok=True)
+    
+    if os.path.exists(DB_PATH_DISK) and not os.path.exists(DB_PATH_RAM):
+        print("Restoring database from physical disk to RAM...")
+        shutil.copy2(DB_PATH_DISK, DB_PATH_RAM)
+
 def get_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    """All active connections point exclusively to the RAM disk."""
+    os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH_RAM, check_same_thread=False, timeout=30)
     try: conn.execute("PRAGMA journal_mode=WAL;")
     except sqlite3.OperationalError: pass
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    init_ram_db() # Ensure RAM disk is populated first
     conn = get_db()
     cursor = conn.cursor()
     
@@ -170,7 +186,25 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("Database initialized.")
+    print("Database initialized in RAM.")
+
+def sync_db_loop():
+    """Background thread that safely dumps the RAM database back to the SD card every 5 minutes."""
+    print("Starting background SQLite sync thread...")
+    while True:
+        time.sleep(300) # Wait 5 minutes
+        if os.path.exists(DB_PATH_RAM):
+            try:
+                # The SQLite Backup API safely locks and copies without corrupting active connections
+                source = sqlite3.connect(DB_PATH_RAM)
+                dest = sqlite3.connect(DB_PATH_DISK)
+                with dest:
+                    source.backup(dest)
+                dest.close()
+                source.close()
+                print("Successfully synced RAM database to persistent physical storage.")
+            except Exception as e:
+                print(f"Failed to sync database to disk: {e}")
 
 # ==========================================
 # BACKGROUND MONITORING & NETWORK TASKS
@@ -1048,15 +1082,20 @@ def init_logos():
 # ==========================================
 # GUNICORN / FLASK BOOTLOADER
 # ==========================================
+# ==========================================
+# GUNICORN / FLASK BOOTLOADER
+# ==========================================
 try:
     init_db()
     init_logos()
     
     os.makedirs('/app/data', exist_ok=True)
-    lock_file = '/app/data/monitor.lock'
+    lock_file = '/app/data_ram/monitor.lock' # Moved lock file to RAM
     if not os.path.exists(lock_file):
         open(lock_file, 'w').close()
+        # Spawn the two background workers
         socketio.start_background_task(monitor_loop)
+        socketio.start_background_task(sync_db_loop)
 except Exception as e:
     print(f"Startup initialization error: {e}")
 
