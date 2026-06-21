@@ -1109,13 +1109,11 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
     
     try:
         # 1. Attempt standard HTTP request
-        # verify=False prevents crashes from self-signed device certificates
         resp = requests.request(method=method, url=target_url, headers=clean_headers, data=data, cookies=cookies, allow_redirects=False, stream=True, timeout=10, verify=False)
         
-        # 2. Transparent HTTPS Upgrade (Anti-Infinite-Loop)
+        # 2. Transparent HTTPS Upgrade
         if resp.status_code in [301, 302, 307, 308]:
             loc = resp.headers.get('Location', '')
-            # If the router demands an HTTPS connection, the proxy natively upgrades without telling the browser
             if loc.startswith(f"https://{device['ip']}") or loc.startswith(f"https://{resolved_ip}"):
                 target_url = f"https://{resolved_ip}/{full_req_path.lstrip('/')}"
                 resp = requests.request(method=method, url=target_url, headers=clean_headers, data=data, cookies=cookies, allow_redirects=False, stream=True, timeout=10, verify=False)
@@ -1134,18 +1132,22 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
                 elif not parsed.hostname and value.startswith('/'):
                     resp_headers[i] = (name, f"/tunnel/{device_type}/{device_id}{value}")
 
-        # 4. Aggressive Deep-Payload IP Scrubbing (Anti-Leak)
+        # 4. Aggressive Deep-Payload IP Scrubbing & Gravity Well
         content_type = resp.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type or 'javascript' in content_type or 'json' in content_type:
             payload = resp.content.decode('utf-8', errors='ignore')
             
-            # Scrub absolute protocol wrappers (http:// and https://)
-            payload = re.sub(rf"https?://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
-            payload = re.sub(rf"https?:\\/\\/{re.escape(device['ip'])}(:\d+)?", f"http:\\/\\/{request.host}/tunnel/{device_type}/{device_id}", payload)
+            # Scrub absolute protocol wrappers (Includes WebSockets ws:// and wss://)
+            payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
+            payload = re.sub(rf"(https?|wss?):\\/\\/{re.escape(device['ip'])}(:\d+)?", f"http:\\/\\/{request.host}/tunnel/{device_type}/{device_id}", payload)
             
-            # Replace naked IPs dynamically built in JS variables 
-            # (Uses regex word boundaries \b to prevent 192.168.1.1 from breaking 192.168.1.100)
+            # Replace naked IPs dynamically built in JS variables
             payload = re.sub(rf"\b{re.escape(device['ip'])}\b", f"{request.host}/tunnel/{device_type}/{device_id}", payload)
+            
+            # INJECT BASE TAG: Forces all relative links to stay inside the tunnel automatically
+            if 'text/html' in content_type:
+                base_tag = f'<base href="/tunnel/{device_type}/{device_id}/">\n'
+                payload = re.sub(r'(<head[^>]*>)', rf'\1\n{base_tag}', payload, flags=re.IGNORECASE)
             
             return Response(payload, resp.status_code, resp_headers)
         else:
@@ -1154,6 +1156,7 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
             
     except requests.exceptions.RequestException as e:
         return f"Tunnel Error connecting to {device['ip']}: {str(e)}", 502
+        
 # ==========================================
 # APPLICATION STARTUP & INITIALIZATION
 # ==========================================
