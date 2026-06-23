@@ -658,7 +658,7 @@
             }
         });
 
-        socket.on('speedtest_result', function(data) {
+socket.on('speedtest_result', function(data) {
             const btn = document.getElementById('speedtestBtn');
             const spinner = document.getElementById('speedtestSpinner');
             const display = document.getElementById('speedtestDisplay');
@@ -669,7 +669,10 @@
                     document.getElementById('st-ping').innerText = data.ping;
                     document.getElementById('st-download').innerText = data.download;
                     document.getElementById('st-upload').innerText = data.upload;
-                    document.getElementById('st-isp').innerText = data.isp;
+                    
+                    // Display the newly emitted server data alongside the ISP
+                    document.getElementById('st-isp').innerText = data.isp + ' | Server: ' + data.server;
+                    
                     display.classList.remove('d-none');
                 } else {
                     errDiv.textContent = 'Test Failed: ' + data.error; errDiv.classList.remove('d-none');
