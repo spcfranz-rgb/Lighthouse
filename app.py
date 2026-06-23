@@ -88,11 +88,9 @@ def decrypt_pwd(pwd):
     try:
         return get_cipher().decrypt(pwd.encode('utf-8')).decode('utf-8')
     except Exception:
-        # If it looks like a Fernet token but failed, the SECRET_KEY is wrong/lost.
         if pwd.startswith('gAAAAA'):
             print("ERROR: Database decryption failed! Secret Key mismatch.")
             return '' 
-        # Otherwise, safely assume it is a legacy plaintext password
         return pwd
 
 # --- AUTHENTIK OIDC SETUP ---
@@ -175,7 +173,9 @@ def init_ram_db():
 
 def get_db():
     """All active connections point exclusively to the RAM disk."""
+    # Enforce directory creation immediately to prevent operational file errors
     os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
+    
     conn = sqlite3.connect(DB_PATH_RAM, check_same_thread=False, timeout=30)
     try: conn.execute("PRAGMA journal_mode=WAL;")
     except sqlite3.OperationalError: pass
@@ -1289,7 +1289,6 @@ def init_logos():
 
     LOCAL_COMPANY_LOGO = process_logo('COMPANY_LOGO_URL', 'company_logo.png')
     LOCAL_CUSTOMER_LOGO = process_logo('CUSTOMER_LOGO_URL', 'customer_logo.png')
-
 
 # ==========================================
 # GUNICORN / FLASK BOOTLOADER
