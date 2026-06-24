@@ -244,6 +244,10 @@ def sync_db_loop():
             try:
                 source = sqlite3.connect(DB_PATH_RAM)
                 dest = sqlite3.connect(DB_PATH_DISK)
+                
+                # FIX: Force traditional journal mode on physical disk to prevent Docker Volume locking
+                dest.execute("PRAGMA journal_mode=DELETE;")
+                
                 with dest:
                     source.backup(dest)
                 dest.close()
