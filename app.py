@@ -1038,8 +1038,13 @@ def run_traceroute():
 def run_speedtest():
     def execute_test():
         try:
+            # FIX: Added --accept-license and --accept-gdpr to prevent interactive hangs
             cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
+            
+            # The rest of the function remains the same
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            
+            # ...
             
             if process.returncode == 0:
                 data = json.loads(process.stdout)
