@@ -18,7 +18,6 @@ import atexit
 import signal
 from datetime import datetime
 import eventlet.greenpool
-from eventlet.event import Event
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -118,9 +117,7 @@ login_manager.login_view = 'login'
 # --- DATABASE PATHS ---
 DB_PATH_DISK = '/app/data/cctv.db'        # Persistent SD Card Storage
 DB_PATH_RAM = '/app/data_ram/cctv.db'     # High-Speed RAM Storage
-
-# Fast native IPC event (Replaces file-system check)
-force_check_event = Event()
+FORCE_CHECK_FLAG = '/app/data_ram/force_check.flag'
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -152,10 +149,8 @@ def operator_required(f):
     return decorated_function
 
 def trigger_monitor_check():
-    """Wakes the background monitoring thread instantly."""
-    global force_check_event
-    if not force_check_event.ready():
-        force_check_event.send(True)
+    try: open(FORCE_CHECK_FLAG, 'w').close()
+    except Exception: pass
 
 # ==========================================
 # DATABASE INITIALIZATION & RAM SYNC
@@ -233,6 +228,10 @@ def init_db():
         default_hash = generate_password_hash(default_pass)
         cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, 'admin')", (default_user, default_hash))
     
+    if os.path.exists(FORCE_CHECK_FLAG):
+        try: os.remove(FORCE_CHECK_FLAG)
+        except OSError: pass
+
     conn.commit()
     conn.close()
     print("Database initialized in RAM.")
@@ -294,8 +293,8 @@ def log_prune_loop():
 # ==========================================
 
 # --- CPU THROTTLE ---
-# Restrict CPU-heavy ffmpeg tasks to 4 concurrent threads to maximize Pi 5 Quad-Core hardware
-SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(4)
+# Restrict CPU-heavy ffmpeg tasks to 2 concurrent threads to prevent ARM meltdown
+SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(2)
 
 def is_valid_target(target):
     """Sanitizes user input to prevent Argument Injection and DoS."""
@@ -310,8 +309,7 @@ def is_valid_target(target):
     return False
 
 def is_pingable(target):
-    # Halved ping timeout (-W 1) for rapid local discovery
-    response = subprocess.call(['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    response = subprocess.call(['ping', '-c', '1', '-W', '2', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return response == 0
 
 def is_port_open(target, port, timeout=2):
@@ -610,16 +608,12 @@ def monitor_loop():
             time.sleep(10)
             continue
             
-        # NATIVE EVENTLET IPC SLEEP: Wait for interval, or instantly wake up if triggered
-        global force_check_event
-        try:
-            with eventlet.Timeout(interval):
-                force_check_event.wait()
-        except eventlet.Timeout:
-            pass # Timeout triggered normally, loop continues
-            
-        if force_check_event.ready():
-            force_check_event.reset()
+        for _ in range(interval):
+            if os.path.exists(FORCE_CHECK_FLAG):
+                try: os.remove(FORCE_CHECK_FLAG)
+                except OSError: pass
+                break
+            time.sleep(1)
 
 # ==========================================
 # FLASK WEB ROUTES
@@ -862,7 +856,7 @@ def fetch_arp_table():
         return jsonify({
             "status": "success",
             "count": len(devices),
-            "interface_scanned": "All Interfaces", 
+            "interface_scanned": "All Interfaces", # <-- Unrestricted Interface Text
             "devices": devices
         }), 200
     except Exception as e:
@@ -1301,8 +1295,8 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
             payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
             payload = re.sub(rf"(https?|wss?):\\/\\/{re.escape(device['ip'])}(:\d+)?", f"http:\\/\\/{request.host}/tunnel/{device_type}/{device_id}", payload)
             
-            # FAST NATIVE STRING REPLACEMENT: Replace naked IPs 
-            payload = payload.replace(device['ip'], f"{request.host}/tunnel/{device_type}/{device_id}")
+            # Replace naked IPs dynamically built in JS variables
+            payload = re.sub(rf"\b{re.escape(device['ip'])}\b", f"{request.host}/tunnel/{device_type}/{device_id}", payload)
             
             # INJECT BASE TAG: Forces all relative links to stay inside the tunnel automatically
             if 'text/html' in content_type:
@@ -1382,11 +1376,14 @@ try:
     init_logos()
     
     os.makedirs('/app/data', exist_ok=True)
+    lock_file = '/app/data_ram/monitor.lock'
+    if not os.path.exists(lock_file):
+        open(lock_file, 'w').close()
         
-    # Spawn the completely isolated background workers
-    socketio.start_background_task(monitor_loop)
-    socketio.start_background_task(sync_db_loop)
-    socketio.start_background_task(log_prune_loop)
+        # Spawn the completely isolated background workers
+        socketio.start_background_task(monitor_loop)
+        socketio.start_background_task(sync_db_loop)
+        socketio.start_background_task(log_prune_loop)
         
 except Exception as e:
     print(f"Startup initialization error: {e}")
