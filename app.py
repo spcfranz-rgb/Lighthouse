@@ -18,6 +18,7 @@ import atexit
 import signal
 from datetime import datetime
 import eventlet.greenpool
+from eventlet.event import Event
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -37,7 +38,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_socketio import SocketIO
 from authlib.integrations.flask_client import OAuth
 from cryptography.fernet import Fernet
-from getmac import get_mac_address
 
 app = Flask(__name__)
 
@@ -118,7 +118,9 @@ login_manager.login_view = 'login'
 # --- DATABASE PATHS ---
 DB_PATH_DISK = '/app/data/cctv.db'        # Persistent SD Card Storage
 DB_PATH_RAM = '/app/data_ram/cctv.db'     # High-Speed RAM Storage
-FORCE_CHECK_FLAG = '/app/data_ram/force_check.flag'
+
+# Fast native IPC event (Replaces file-system check)
+force_check_event = Event()
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -150,8 +152,10 @@ def operator_required(f):
     return decorated_function
 
 def trigger_monitor_check():
-    try: open(FORCE_CHECK_FLAG, 'w').close()
-    except Exception: pass
+    """Wakes the background monitoring thread instantly."""
+    global force_check_event
+    if not force_check_event.ready():
+        force_check_event.send(True)
 
 # ==========================================
 # DATABASE INITIALIZATION & RAM SYNC
@@ -229,10 +233,6 @@ def init_db():
         default_hash = generate_password_hash(default_pass)
         cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, 'admin')", (default_user, default_hash))
     
-    if os.path.exists(FORCE_CHECK_FLAG):
-        try: os.remove(FORCE_CHECK_FLAG)
-        except OSError: pass
-
     conn.commit()
     conn.close()
     print("Database initialized in RAM.")
@@ -294,8 +294,8 @@ def log_prune_loop():
 # ==========================================
 
 # --- CPU THROTTLE ---
-# Restrict CPU-heavy ffmpeg tasks to 2 concurrent threads to prevent ARM meltdown
-SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(2)
+# Restrict CPU-heavy ffmpeg tasks to 4 concurrent threads to maximize Pi 5 Quad-Core hardware
+SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(4)
 
 def is_valid_target(target):
     """Sanitizes user input to prevent Argument Injection and DoS."""
@@ -310,7 +310,8 @@ def is_valid_target(target):
     return False
 
 def is_pingable(target):
-    response = subprocess.call(['ping', '-c', '1', '-W', '2', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Halved ping timeout (-W 1) for rapid local discovery
+    response = subprocess.call(['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return response == 0
 
 def is_port_open(target, port, timeout=2):
@@ -323,6 +324,20 @@ def is_stream_active(url):
         response = subprocess.call(['ffprobe', '-rtsp_transport', '-v', 'error', '-i', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         return response == 0
     except subprocess.TimeoutExpired: return False
+
+def get_mac_address(ip):
+    """Native, Docker-safe ARP cache reader bypasses legacy pip libraries."""
+    try:
+        with open('/proc/net/arp', 'r') as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == ip:
+                    mac = parts[3]
+                    if mac != "00:00:00:00:00:00":
+                        return mac.upper()
+    except FileNotFoundError:
+        pass
+    return None
 
 def get_camlan_arp_table():
     """Reads the raw Linux ARP cache directly from the kernel across all interfaces."""
@@ -385,17 +400,14 @@ def threaded_camera_check(cam):
     stream_ok = False
     snap_bytes = None
     mac = cam.get('mac_address', '')
+    fetched_mac = None
     
     if cam_up:
         # ARP Sweep for MAC Address (Requires Docker Host Network Mode)
         if not mac:
-            fetched_mac = get_mac_address(ip=cam['ip'])
-            if fetched_mac:
-                mac = fetched_mac.upper()
-                conn = get_db()
-                conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (mac, cam['id']))
-                conn.commit()
-                conn.close()
+            new_mac = get_mac_address(cam['ip'])
+            if new_mac:
+                fetched_mac = new_mac.upper()
 
         stream_ok = is_stream_active(cam['stream_url'])
         if stream_ok:
@@ -403,7 +415,7 @@ def threaded_camera_check(cam):
             with SNAPSHOT_SEMAPHORE:
                 snap_bytes = get_snapshot_bytes(cam['ip'], cam['manufacturer'], cam['username'], cam['password'], cam['stream_url'])
                 
-    return cam['id'], cam_up, stream_ok, snap_bytes
+    return cam['id'], cam_up, stream_ok, snap_bytes, fetched_mac
 
 def monitor_loop():
     print("Starting concurrent background monitoring thread...")
@@ -450,7 +462,10 @@ def monitor_loop():
             
             for switch in switches:
                 switch_id, switch_name, switch_ip = switch['id'], switch['name'], switch['ip']
-                s_until, mac = switch['silenced_until'], switch.get('mac_address', '')
+                
+                # Use strict bracket notation
+                s_until = switch['silenced_until']
+                mac = switch['mac_address']
                 silenced = s_until > now
                 is_up = is_pingable(switch_ip) or is_port_open(switch_ip, 80) or is_port_open(switch_ip, 443)
                 
@@ -459,7 +474,7 @@ def monitor_loop():
                 
                 if is_up:
                     if not mac:
-                        fetched_mac = get_mac_address(ip=switch_ip)
+                        fetched_mac = get_mac_address(switch_ip)
                         if fetched_mac:
                             conn.execute("UPDATE switches SET mac_address = ? WHERE id = ?", (fetched_mac.upper(), switch_id))
                             
@@ -477,11 +492,14 @@ def monitor_loop():
                         
                     camera_results = {}
                     pool = eventlet.greenpool.GreenPool(size=20)
-                    for c_id, cam_up, stream_ok, snap_bytes in pool.imap(threaded_camera_check, camera_list):
+                    for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in pool.imap(threaded_camera_check, camera_list):
                         camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                        if fetched_mac:
+                            conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
                     for cam in cameras:
-                        cam_silenced = (cam.get('silenced_until', 0) > now) or (switch.get('silenced_until', 0) > now)
+                        # Strict bracket notation for both database rows
+                        cam_silenced = (cam['silenced_until'] > now) or (switch['silenced_until'] > now)
     
                         cam_id, cam_name = cam['id'], cam['name']
                         cam_up, stream_ok, snap_bytes = camera_results[cam_id]
@@ -541,8 +559,10 @@ def monitor_loop():
                 
             standalone_results = {}
             standalone_pool = eventlet.greenpool.GreenPool(size=20)
-            for c_id, cam_up, stream_ok, snap_bytes in standalone_pool.imap(threaded_camera_check, standalone_list):
+            for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in standalone_pool.imap(threaded_camera_check, standalone_list):
                 standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                if fetched_mac:
+                    conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
             for cam in standalone_cameras:
                 cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
@@ -590,12 +610,16 @@ def monitor_loop():
             time.sleep(10)
             continue
             
-        for _ in range(interval):
-            if os.path.exists(FORCE_CHECK_FLAG):
-                try: os.remove(FORCE_CHECK_FLAG)
-                except OSError: pass
-                break
-            time.sleep(1)
+        # NATIVE EVENTLET IPC SLEEP: Wait for interval, or instantly wake up if triggered
+        global force_check_event
+        try:
+            with eventlet.Timeout(interval):
+                force_check_event.wait()
+        except eventlet.Timeout:
+            pass # Timeout triggered normally, loop continues
+            
+        if force_check_event.ready():
+            force_check_event.reset()
 
 # ==========================================
 # FLASK WEB ROUTES
@@ -675,12 +699,18 @@ def logout():
 def index():
     now = time.time()
     conn = get_db()
+    
+    # 1. Fetch switches and their silenced status
     switches = conn.execute("SELECT *, (silenced_until > ?) as is_silenced FROM switches", (now,)).fetchall()
+    
+    # 2. Fetch cameras and inherit silenced status from parent switches
     cameras = conn.execute("""
-        SELECT c.*, s.name as switch_name, (c.silenced_until > ?) as is_silenced 
+        SELECT c.*, s.name as switch_name, 
+               ((c.silenced_until > ?) OR (s.silenced_until > ?)) as is_silenced 
         FROM cameras c 
         LEFT JOIN switches s ON c.switch_id = s.id
-    """, (now,)).fetchall()
+    """, (now, now)).fetchall()
+    
     cursor = conn.cursor()
     cursor.execute("SELECT key, value FROM settings")
     settings_dict = {row['key']: row['value'] for row in cursor.fetchall()}
@@ -689,22 +719,6 @@ def index():
     
     return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users)
     
-    # Wrap the template rendering in a response object
-    response = make_response(render_template(
-        'index.html', 
-        switches=switches, 
-        cameras=cameras, 
-        settings=settings_dict, 
-        users=users
-    ))
-    
-    # Strict headers telling Proxies and Browsers NEVER to cache the HTML
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    
-    return response
-
 @app.route('/history')
 @login_required
 def history():
@@ -848,7 +862,7 @@ def fetch_arp_table():
         return jsonify({
             "status": "success",
             "count": len(devices),
-            "interface_scanned": "All Interfaces", # <-- Updated this line
+            "interface_scanned": "All Interfaces", 
             "devices": devices
         }), 200
     except Exception as e:
@@ -1287,8 +1301,8 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
             payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
             payload = re.sub(rf"(https?|wss?):\\/\\/{re.escape(device['ip'])}(:\d+)?", f"http:\\/\\/{request.host}/tunnel/{device_type}/{device_id}", payload)
             
-            # Replace naked IPs dynamically built in JS variables
-            payload = re.sub(rf"\b{re.escape(device['ip'])}\b", f"{request.host}/tunnel/{device_type}/{device_id}", payload)
+            # FAST NATIVE STRING REPLACEMENT: Replace naked IPs 
+            payload = payload.replace(device['ip'], f"{request.host}/tunnel/{device_type}/{device_id}")
             
             # INJECT BASE TAG: Forces all relative links to stay inside the tunnel automatically
             if 'text/html' in content_type:
@@ -1368,14 +1382,11 @@ try:
     init_logos()
     
     os.makedirs('/app/data', exist_ok=True)
-    lock_file = '/app/data_ram/monitor.lock'
-    if not os.path.exists(lock_file):
-        open(lock_file, 'w').close()
         
-        # Spawn the completely isolated background workers
-        socketio.start_background_task(monitor_loop)
-        socketio.start_background_task(sync_db_loop)
-        socketio.start_background_task(log_prune_loop)
+    # Spawn the completely isolated background workers
+    socketio.start_background_task(monitor_loop)
+    socketio.start_background_task(sync_db_loop)
+    socketio.start_background_task(log_prune_loop)
         
 except Exception as e:
     print(f"Startup initialization error: {e}")
