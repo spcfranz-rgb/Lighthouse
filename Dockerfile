@@ -1,8 +1,7 @@
-# Dockerfile
 # Use a lightweight Python base image
 FROM python:3.9-slim
 
-# Install system dependencies, fetch the Ookla repository, install speedtest, and clean up
+# Install system dependencies, determine CPU architecture, fetch Ookla native binary, and clean up
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         iputils-ping \
@@ -10,10 +9,17 @@ RUN apt-get update && \
         ffmpeg \
         sqlite3 \
         curl \
-        gnupg2 \
+        wget \
+        tar \
         ca-certificates && \
-    curl -s [https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh](https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh) | bash && \
-    apt-get install -y --no-install-recommends speedtest && \
+    ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then \
+        wget -qO- https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-aarch64.tgz | tar xvz -C /usr/local/bin speedtest; \
+    elif [ "$ARCH" = "amd64" ]; then \
+        wget -qO- https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz | tar xvz -C /usr/local/bin speedtest; \
+    else \
+        echo "Unsupported architecture" && exit 1; \
+    fi && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
