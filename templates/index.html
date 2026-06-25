@@ -42,22 +42,22 @@
       {% endif %}
     {% endwith %}
 
-    <ul class="nav nav-tabs mb-4 border-secondary" id="dashboardTabs" role="tablist">
+    <ul class="nav nav-tabs mb-4" id="dashboardTabs" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link active text-light bg-dark border-secondary" id="monitoring-tab" data-bs-toggle="tab" data-bs-target="#tab-monitoring" type="button" role="tab" aria-selected="true">
+            <button class="nav-link active fw-bold" id="monitoring-tab" data-bs-toggle="tab" data-bs-target="#tab-monitoring" type="button" role="tab" aria-selected="true">
                 📡 Live Monitoring
             </button>
         </li>
         {% if current_user.role in ['admin', 'operator'] %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link text-info border-secondary" id="diagnostics-tab" data-bs-toggle="tab" data-bs-target="#tab-diagnostics" type="button" role="tab" aria-selected="false">
+            <button class="nav-link text-info" id="diagnostics-tab" data-bs-toggle="tab" data-bs-target="#tab-diagnostics" type="button" role="tab" aria-selected="false">
                 🛠️ Diagnostics
             </button>
         </li>
         {% endif %}
         {% if current_user.role == 'admin' %}
         <li class="nav-item" role="presentation">
-            <button class="nav-link text-warning border-secondary" id="admin-tab" data-bs-toggle="tab" data-bs-target="#tab-admin" type="button" role="tab" aria-selected="false">
+            <button class="nav-link text-warning" id="admin-tab" data-bs-toggle="tab" data-bs-target="#tab-admin" type="button" role="tab" aria-selected="false">
                 ⚙️ Administration
             </button>
         </li>
@@ -69,8 +69,8 @@
         <div class="tab-pane fade show active" id="tab-monitoring" role="tabpanel">
             <div class="row">
                 <div class="col-xl-4 col-lg-5">
-                    <div class="card mb-4 shadow-sm">
-                        <div class="card-header"><h5 class="mb-0">Network Switches</h5></div>
+                    <div class="card mb-4 shadow-sm border-secondary">
+                        <div class="card-header bg-dark border-secondary"><h5 class="mb-0">Network Switches</h5></div>
                         <div class="card-body">
                             <div class="table-responsive">
                                 <table class="table table-sm align-middle text-nowrap">
@@ -116,13 +116,13 @@
                             </div>
                             
                             {% if current_user.role == 'admin' %}
-                            <hr>
+                            <hr class="border-secondary">
                             <h6>Add Switch</h6>
                             <form action="/add_switch" method="POST" id="addSwitchForm">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                <input type="text" name="name" class="form-control mb-2" placeholder="Switch Name" aria-label="Switch Name" required>
-                                <input type="text" name="ip" class="form-control mb-2" placeholder="IP / Hostname" aria-label="Switch IP" required>
-                                <button type="submit" class="btn btn-primary btn-sm w-100">Add Switch</button>
+                                <input type="text" name="name" class="form-control mb-2 border-secondary" placeholder="Switch Name" aria-label="Switch Name" required>
+                                <input type="text" name="ip" class="form-control mb-2 border-secondary" placeholder="IP / Hostname" aria-label="Switch IP" required>
+                                <button type="submit" class="btn btn-primary btn-sm w-100 fw-bold">Add Switch</button>
                             </form>
                             {% endif %}
                         </div>
@@ -130,8 +130,8 @@
                 </div>
 
                 <div class="col-xl-8 col-lg-7">
-                    <div class="card shadow-sm mb-4">
-                        <div class="card-header d-flex justify-content-between align-items-center">
+                    <div class="card shadow-sm mb-4 border-secondary">
+                        <div class="card-header bg-dark border-secondary d-flex justify-content-between align-items-center">
                             <h5 class="mb-0">Cameras</h5>
                         </div>
                         <div class="card-body">
@@ -183,14 +183,14 @@
                             </div>
 
                             {% if current_user.role == 'admin' %}
-                            <hr>
+                            <hr class="border-secondary">
                             <div class="d-flex justify-content-between align-items-center mb-2">
                                 <h6 class="mb-0">Add Camera</h6>
                                 <div class="dropdown">
-                                    <button class="btn btn-outline-info btn-sm dropdown-toggle py-0" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+                                    <button class="btn btn-outline-info btn-sm dropdown-toggle py-0 fw-bold" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
                                         Auto-Discover
                                     </button>
-                                    <div class="dropdown-menu dropdown-menu-end p-3 shadow" style="width: 100%; max-width: 320px;">
+                                    <div class="dropdown-menu dropdown-menu-end p-3 shadow border-secondary" style="width: 100%; max-width: 320px;">
                                         <p class="small text-muted mb-2">Scan a local subnet for port 554 (RTSP).</p>
                                         <div class="input-group input-group-sm mb-2">
                                             <input type="text" id="scanSubnetInput" class="form-control" placeholder="192.168.1.0/24" value="{{ default_subnet }}" aria-label="Subnet CIDR">
@@ -201,7 +201,7 @@
                                             <span class="ms-2 small text-muted">Sweeping subnet...</span>
                                         </div>
                                         <div id="scanResults" class="small mt-2"></div>
-                                        <div id="bulkAddOptions" class="d-none mt-3 pt-2 border-top">
+                                        <div id="bulkAddOptions" class="d-none mt-3 pt-2 border-top border-secondary">
                                             <label class="form-label small fw-bold mb-1">Mass-Add Selected</label>
                                             <select id="bulkMfg" class="form-select form-select-sm mb-1" aria-label="Bulk Manufacturer">
                                                 <option value="Other">Other (FFmpeg RTSP)</option>
@@ -213,7 +213,7 @@
                                                 <input type="text" id="bulkUser" class="form-control" placeholder="Shared User" aria-label="Shared User">
                                                 <input type="password" id="bulkPass" class="form-control" placeholder="Shared Pass" aria-label="Shared Password">
                                             </div>
-                                            <button class="btn btn-success btn-sm w-100" id="submitBulkBtn" onclick="submitBulkAdd()">Add Checked Cameras</button>
+                                            <button class="btn btn-success btn-sm w-100 fw-bold" id="submitBulkBtn" onclick="submitBulkAdd()">Add Checked Cameras</button>
                                         </div>
                                     </div>
                                 </div>
@@ -223,17 +223,17 @@
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <div class="row gx-2 mb-2">
                                     <div class="col-md-3">
-                                        <select name="switch_id" class="form-select form-select-sm" aria-label="Parent Switch">
+                                        <select name="switch_id" class="form-select form-select-sm border-secondary" aria-label="Parent Switch">
                                             <option value="" selected>None (Standalone)</option>
                                             {% for s in switches %}
                                             <option value="{{ s.id }}">{{ s.name }}</option>
                                             {% endfor %}
                                         </select>
                                     </div>
-                                    <div class="col-md-3"><input type="text" name="name" class="form-control form-control-sm" placeholder="Cam Name" aria-label="Camera Name" required></div>
-                                    <div class="col-md-3"><input type="text" id="manualCamIp" name="ip" class="form-control form-control-sm" placeholder="IP / Hostname" aria-label="Camera IP" required></div>
+                                    <div class="col-md-3"><input type="text" name="name" class="form-control form-control-sm border-secondary" placeholder="Cam Name" aria-label="Camera Name" required></div>
+                                    <div class="col-md-3"><input type="text" id="manualCamIp" name="ip" class="form-control form-control-sm border-secondary" placeholder="IP / Hostname" aria-label="Camera IP" required></div>
                                     <div class="col-md-3">
-                                        <select name="manufacturer" class="form-select form-select-sm" aria-label="Manufacturer" required>
+                                        <select name="manufacturer" class="form-select form-select-sm border-secondary" aria-label="Manufacturer" required>
                                             <option value="Other">Other (FFmpeg)</option>
                                             <option value="Hanwha">Hanwha / Wisenet</option>
                                             <option value="Hikvision">Hikvision</option>
@@ -245,10 +245,10 @@
                                     </div>
                                 </div>
                                 <div class="row gx-2">
-                                    <div class="col-md-3"><input type="text" name="username" class="form-control form-control-sm" placeholder="Camera User" aria-label="Username"></div>
-                                    <div class="col-md-3"><input type="password" name="password" class="form-control form-control-sm" placeholder="Camera Pass" aria-label="Password"></div>
-                                    <div class="col-md-5"><input type="text" name="stream_url" class="form-control form-control-sm" placeholder="RTSP URL (Fallback/Monitor)" aria-label="Stream URL" required></div>
-                                    <div class="col-md-1"><button type="submit" class="btn btn-primary btn-sm w-100">+</button></div>
+                                    <div class="col-md-3"><input type="text" name="username" class="form-control form-control-sm border-secondary" placeholder="Camera User" aria-label="Username"></div>
+                                    <div class="col-md-3"><input type="password" name="password" class="form-control form-control-sm border-secondary" placeholder="Camera Pass" aria-label="Password"></div>
+                                    <div class="col-md-5"><input type="text" name="stream_url" class="form-control form-control-sm border-secondary" placeholder="RTSP URL (Fallback/Monitor)" aria-label="Stream URL" required></div>
+                                    <div class="col-md-1"><button type="submit" class="btn btn-primary btn-sm w-100 fw-bold">+</button></div>
                                 </div>
                             </form>
                             {% endif %}
@@ -263,12 +263,12 @@
             <div class="row">
                 <div class="col-lg-6 mb-4">
                     <div class="card h-100 shadow-sm border-info">
-                        <div class="card-header border-info text-info"><h5 class="mb-0">Manual Diagnostic Tool</h5></div>
+                        <div class="card-header bg-dark border-info text-info"><h5 class="mb-0">Manual Diagnostic Tool</h5></div>
                         <div class="card-body">
                             <div class="input-group mb-3">
-                                <input type="text" id="diagIp" class="form-control" placeholder="IP or Hostname (e.g. 192.168.1.5)" aria-label="Diagnostic Target">
-                                <button class="btn btn-outline-info" type="button" id="pingBtn" onclick="runPing()">Ping</button>
-                                <button class="btn btn-outline-warning" type="button" id="traceBtn" onclick="runTrace()">Trace</button>
+                                <input type="text" id="diagIp" class="form-control border-secondary" placeholder="IP or Hostname (e.g. 192.168.1.5)" aria-label="Diagnostic Target">
+                                <button class="btn btn-outline-info fw-bold" type="button" id="pingBtn" onclick="runPing()">Ping</button>
+                                <button class="btn btn-outline-warning fw-bold" type="button" id="traceBtn" onclick="runTrace()">Trace</button>
                             </div>
                             
                             <div id="diagSpinner" class="text-center d-none mb-2">
@@ -276,19 +276,19 @@
                                 <span id="diagSpinnerText" class="ms-2 small text-muted">Running diagnostic...</span>
                             </div>
                             
-                            <pre id="diagOutput" class="bg-black text-light p-3 rounded small d-none" style="max-height: 300px; overflow-y: auto; font-family: monospace;"></pre>
+                            <pre id="diagOutput" class="bg-black text-light p-3 rounded small d-none border border-secondary" style="max-height: 300px; overflow-y: auto; font-family: monospace;"></pre>
                         </div>
                     </div>
                 </div>
 
                 <div class="col-lg-6 mb-4">
                     <div class="card h-100 shadow-sm border-warning">
-                        <div class="card-header border-warning text-warning"><h5 class="mb-0">WAN Speed Test</h5></div>
+                        <div class="card-header bg-dark border-warning text-warning"><h5 class="mb-0">WAN Speed Test</h5></div>
                         <div class="card-body">
                             <p class="small text-muted mb-4">Test the external internet connection speed of the gateway system.</p>
                             <div id="speedtestDisplay" class="row text-center mb-4 d-none">
-                                <div class="col-4 border-end"><small class="text-muted d-block text-uppercase mb-1">Ping</small><h4 id="st-ping" class="text-info mb-0">-</h4></div>
-                                <div class="col-4 border-end"><small class="text-muted d-block text-uppercase mb-1">Download</small><h4 id="st-download" class="text-success mb-0">-</h4></div>
+                                <div class="col-4 border-end border-secondary"><small class="text-muted d-block text-uppercase mb-1">Ping</small><h4 id="st-ping" class="text-info mb-0">-</h4></div>
+                                <div class="col-4 border-end border-secondary"><small class="text-muted d-block text-uppercase mb-1">Download</small><h4 id="st-download" class="text-success mb-0">-</h4></div>
                                 <div class="col-4"><small class="text-muted d-block text-uppercase mb-1">Upload</small><h4 id="st-upload" class="text-warning mb-0">-</h4></div>
                                 <div class="col-12 mt-3"><small class="text-muted">Target Server: <span id="st-isp" class="fw-bold text-light">-</span></small></div>
                             </div>
@@ -309,30 +309,30 @@
         <div class="tab-pane fade" id="tab-admin" role="tabpanel">
             <div class="row">
                 <div class="col-lg-6 mb-4">
-                    <div class="card h-100 shadow-sm">
-                        <div class="card-header"><h5 class="mb-0">Global Configuration</h5></div>
+                    <div class="card h-100 shadow-sm border-secondary">
+                        <div class="card-header bg-dark border-secondary"><h5 class="mb-0">Global Configuration</h5></div>
                         <div class="card-body bg-body-tertiary">
                             <form action="/update_settings" method="POST" id="updateSettingsForm">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <div class="mb-3">
                                     <label for="mqtt_broker" class="form-label small text-muted fw-bold mb-1">MQTT Broker IP</label>
-                                    <input type="text" id="mqtt_broker" name="mqtt_broker" class="form-control" value="{{ settings.mqtt_broker }}" required>
+                                    <input type="text" id="mqtt_broker" name="mqtt_broker" class="form-control border-secondary" value="{{ settings.mqtt_broker }}" required>
                                 </div>
                                 <div class="row mb-3">
                                     <div class="col-6">
                                         <label for="mqtt_port" class="form-label small text-muted fw-bold mb-1">MQTT Port</label>
-                                        <input type="number" id="mqtt_port" name="mqtt_port" class="form-control" value="{{ settings.mqtt_port }}" required>
+                                        <input type="number" id="mqtt_port" name="mqtt_port" class="form-control border-secondary" value="{{ settings.mqtt_port }}" required>
                                     </div>
                                     <div class="col-6">
                                         <label for="check_interval" class="form-label small text-muted fw-bold mb-1">Check Interval (Sec)</label>
-                                        <input type="number" id="check_interval" name="check_interval" class="form-control" value="{{ settings.check_interval }}" required>
+                                        <input type="number" id="check_interval" name="check_interval" class="form-control border-secondary" value="{{ settings.check_interval }}" required>
                                     </div>
                                 </div>
                                 <div class="mb-4">
                                     <label for="mqtt_prefix" class="form-label small text-muted fw-bold mb-1">MQTT Topic Prefix</label>
-                                    <input type="text" id="mqtt_prefix" name="mqtt_prefix" class="form-control" value="{{ settings.mqtt_prefix }}" required>
+                                    <input type="text" id="mqtt_prefix" name="mqtt_prefix" class="form-control border-secondary" value="{{ settings.mqtt_prefix }}" required>
                                 </div>
-                                <button type="submit" class="btn btn-primary w-100">Save Network Settings</button>
+                                <button type="submit" class="btn btn-primary w-100 fw-bold">Save Network Settings</button>
                             </form>
                             
                             <hr class="my-4 border-secondary">
@@ -353,18 +353,18 @@
                 </div>
 
                 <div class="col-lg-6 mb-4">
-                    <div class="card h-100 shadow-sm">
-                        <div class="card-header"><h5 class="mb-0">Access Management</h5></div>
+                    <div class="card h-100 shadow-sm border-secondary">
+                        <div class="card-header bg-dark border-secondary"><h5 class="mb-0">Access Management</h5></div>
                         <div class="card-body">
-                            <div class="table-responsive mb-3">
-                                <table class="table table-hover align-middle text-nowrap">
-                                    <thead class="table-dark"><tr><th>Username</th><th>Role</th><th></th></tr></thead>
+                            <div class="table-responsive mb-3 border border-secondary rounded">
+                                <table class="table table-hover align-middle text-nowrap mb-0">
+                                    <thead class="table-dark"><tr><th class="ps-3">Username</th><th>Role</th><th></th></tr></thead>
                                     <tbody>
                                         {% for u in users %}
                                         <tr>
-                                            <td class="fw-bold">{{ u.username }}</td>
+                                            <td class="fw-bold ps-3">{{ u.username }}</td>
                                             <td><span class="badge bg-secondary">{{ u.role }}</span></td>
-                                            <td class="text-end">
+                                            <td class="text-end pe-3">
                                                 {% if u.id != current_user.id %}
                                                 <button class="btn btn-outline-danger btn-sm" onclick="confirmDelete('/delete_user/{{ u.id }}', 'User: {{ u.username }}')">Delete</button>
                                                 {% endif %}
@@ -379,16 +379,16 @@
                                 <h6 class="mb-3">Provision Local Account</h6>
                                 <form action="/add_user" method="POST" id="addUserForm">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                    <div class="mb-2"><input type="text" name="username" class="form-control" placeholder="Username" aria-label="New Username" required></div>
-                                    <div class="mb-2"><input type="password" name="password" class="form-control" placeholder="Secure Password" aria-label="New Password" required></div>
+                                    <div class="mb-2"><input type="text" name="username" class="form-control border-secondary" placeholder="Username" aria-label="New Username" required></div>
+                                    <div class="mb-2"><input type="password" name="password" class="form-control border-secondary" placeholder="Secure Password" aria-label="New Password" required></div>
                                     <div class="mb-3">
-                                        <select name="role" class="form-select" aria-label="User Role" required>
+                                        <select name="role" class="form-select border-secondary" aria-label="User Role" required>
                                             <option value="user">Viewer Only (Read-Only)</option>
                                             <option value="operator">Operator (Diagnostics + Silence)</option>
                                             <option value="admin">Administrator (Full Config)</option>
                                         </select>
                                     </div>
-                                    <button type="submit" class="btn btn-secondary w-100">Create Account</button>
+                                    <button type="submit" class="btn btn-secondary w-100 fw-bold">Create Account</button>
                                 </form>
                             </div>
                         </div>
@@ -401,16 +401,16 @@
 
     <div class="modal fade" id="previewModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-lg modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header">
+        <div class="modal-content border-secondary">
+          <div class="modal-header bg-dark border-secondary">
             <h5 class="modal-title" id="previewModalLabel">Camera Preview</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body text-center bg-dark" style="min-height: 300px;">
             <div class="spinner-border text-primary mt-5" id="previewSpinner" role="status">
                 <span class="visually-hidden">Loading...</span>
             </div>
-            <img id="previewImage" src="" class="img-fluid d-none rounded" alt="Stream Preview">
+            <img id="previewImage" src="" class="img-fluid d-none rounded border border-secondary" alt="Stream Preview">
           </div>
         </div>
       </div>
@@ -419,14 +419,14 @@
     {% if current_user.role == 'admin' %}
     <div class="modal fade" id="importModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog">
-        <div class="modal-content">
-          <div class="modal-header">
+        <div class="modal-content border-secondary">
+          <div class="modal-header bg-dark border-secondary">
             <h5 class="modal-title">Import Configuration</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <form action="/import_config" method="POST" enctype="multipart/form-data" id="importForm">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-              <div class="modal-body">
+              <div class="modal-body bg-dark">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <p class="small text-muted mb-0">Upload a <code>.csv</code> configuration file.</p>
                     <a href="/download_template" class="btn btn-sm btn-outline-info py-0">Download Template</a>
@@ -434,11 +434,11 @@
                 <div class="alert alert-warning py-2 small">
                     <strong>Note:</strong> This is a non-destructive merge. Existing devices with the exact same name will be updated. New devices will be added. No devices will be deleted.
                 </div>
-                <input type="file" name="file" accept=".csv" class="form-control form-control-sm border-secondary" required>
+                <input type="file" name="file" accept=".csv" class="form-control form-control-sm border-secondary bg-body-tertiary" required>
               </div>
-              <div class="modal-footer d-flex justify-content-between border-top-0 pt-0">
+              <div class="modal-footer bg-dark d-flex justify-content-between border-top border-secondary">
                   <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                  <button type="submit" class="btn btn-primary btn-sm">Upload & Import</button>
+                  <button type="submit" class="btn btn-primary btn-sm fw-bold">Upload & Import</button>
               </div>
           </form>
         </div>
@@ -454,13 +454,13 @@
       <div class="modal-dialog modal-lg">
         <div class="modal-content bg-dark border-secondary">
           <div class="modal-header border-secondary">
-            <h5 class="modal-title text-info">Live L2 Hardware Discovery (CAMLAN)</h5>
+            <h5 class="modal-title text-warning">Live L2 Hardware Discovery</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
             <p class="small text-muted mb-3">Directly reading the Linux Kernel <code>/proc/net/arp</code> cache for interface bypass...</p>
-            <table class="table table-dark table-sm table-hover align-middle">
-                <thead><tr><th>IP Address</th><th>MAC Address</th><th>Interface</th></tr></thead>
+            <table class="table table-dark table-sm table-hover align-middle border border-secondary">
+                <thead class="table-active"><tr><th class="ps-3">IP Address</th><th>MAC Address</th><th>Interface</th></tr></thead>
                 <tbody id="arpResultsBody"></tbody>
             </table>
           </div>
@@ -468,13 +468,16 @@
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmxc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-2huaZvOR9iDzHqslqwpR87isEmrfxqyWOF7hr7BY6KG0+hVKLoEXMPUJw3ynWuhO" crossorigin="anonymous"></script>
 
     <script>
         // --- GLOBAL INITIALIZATION ---
         const socket = io();
-        const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+        
+        // Securely fetch CSRF token with a fallback so JS doesn't crash if the meta tag is missing.
+        const metaCsrf = document.querySelector('meta[name="csrf-token"]');
+        const csrfToken = metaCsrf ? metaCsrf.getAttribute('content') : '';
         
         // Cache DOM elements
         const diagIpInput = document.getElementById('diagIp');
@@ -499,7 +502,7 @@
                 <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
               </div>`;
             
-            toastEl.querySelector('.toast-body').textContent = message; // Prevents XSS injection
+            toastEl.querySelector('.toast-body').textContent = message; 
             container.appendChild(toastEl);
             const toast = new bootstrap.Toast(toastEl, { delay: 4000 });
             toast.show();
@@ -541,7 +544,7 @@
                         const tr = document.createElement('tr');
                         
                         const tdIp = document.createElement('td');
-                        tdIp.className = "text-info font-monospace";
+                        tdIp.className = "text-info font-monospace ps-3";
                         tdIp.textContent = d.ip;
                         
                         const tdMac = document.createElement('td');
@@ -564,7 +567,7 @@
         function toggleSilence(type, id, hours, btnElement) {
             const formData = new FormData();
             formData.append('hours', hours);
-            formData.append('csrf_token', csrfToken); // Include CSRF for AJAX
+            formData.append('csrf_token', csrfToken); 
 
             const badge = document.getElementById(`status-${type}-${id}`);
             const originalBadgeText = badge ? badge.innerText : '';
@@ -579,15 +582,12 @@
                 if (!data.success) throw new Error("Backend failed.");
                 showToast(hours > 0 ? "Device silenced successfully." : "Silence removed.", "success");
                 
-                // Swap the button in-place without page reload
                 const newBtn = document.createElement('button');
                 newBtn.className = hours > 0 ? 'btn btn-warning btn-sm' : 'btn btn-outline-secondary btn-sm';
                 newBtn.title = hours > 0 ? 'Un-silence Device' : 'Silence Alerts (24h)';
                 newBtn.textContent = hours > 0 ? '🔇' : '🔔';
                 newBtn.onclick = () => toggleSilence(type, id, hours > 0 ? 0 : 24, newBtn);
                 btnElement.parentNode.replaceChild(newBtn, btnElement);
-                
-                // Note: The actual status badge update is handled by the Socket.IO broadcast from the backend
             })
             .catch(() => {
                 showToast("Network error. Could not change silence state.", "danger");
@@ -785,7 +785,6 @@
                     return;
                 }
 
-                // Construct DOM elements securely
                 const wrapper = document.createElement('div');
                 
                 const header = document.createElement('div');
@@ -799,13 +798,13 @@
                 wrapper.appendChild(controls);
 
                 const list = document.createElement('ul');
-                list.className = "list-group list-group-flush border rounded mb-2";
+                list.className = "list-group list-group-flush border border-secondary rounded mb-2";
                 list.style.maxHeight = "150px";
                 list.style.overflowY = "auto";
 
                 data.discovered.forEach(ip => {
                     const li = document.createElement('li');
-                    li.className = "list-group-item py-1 px-2 d-flex align-items-center";
+                    li.className = "list-group-item py-1 px-2 d-flex align-items-center bg-dark text-light border-secondary";
                     
                     const chk = document.createElement('input');
                     chk.className = "form-check-input me-2 bulk-ip-check";
@@ -814,11 +813,11 @@
                     chk.checked = true;
                     
                     const span = document.createElement('span');
-                    span.className = "text-primary flex-grow-1";
+                    span.className = "text-primary flex-grow-1 font-monospace";
                     span.style.cursor = "pointer";
                     span.title = "Click to auto-fill manual form below";
                     span.textContent = ip;
-                    span.dataset.ip = ip; // Secure data attribute
+                    span.dataset.ip = ip; 
                     
                     span.addEventListener('click', () => {
                         const targetInput = document.getElementById('manualCamIp');
