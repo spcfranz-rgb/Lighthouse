@@ -658,12 +658,19 @@ def index():
     cursor = conn.cursor()
     cursor.execute("SELECT key, value FROM settings")
     settings_dict = {row['key']: row['value'] for row in cursor.fetchall()}
+    
+    # Parse the saved speed test
+    latest_speedtest = None
+    if 'latest_speedtest' in settings_dict:
+        try: latest_speedtest = json.loads(settings_dict['latest_speedtest'])
+        except Exception: pass
+        
     users = conn.execute("SELECT id, username, role FROM users").fetchall()
     conn.close()
     
     default_subnet = get_local_subnet()
     
-    return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users, default_subnet=default_subnet)
+    return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users, default_subnet=default_subnet, latest_speedtest=latest_speedtest)
     
 @app.route('/history')
 @login_required
@@ -907,7 +914,36 @@ def run_speedtest():
                 upload = round((data['upload']['bandwidth'] * 8) / 1000000, 2)
                 ping = round(data['ping']['latency'], 1)
                 server_string = f"{data.get('server', {}).get('name', 'Unknown')} ({data.get('server', {}).get('location', 'Unknown')})"
-                socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string})
+                
+                now = time.time()
+                try:
+                    # Save results to the database to persist across page reloads
+                    conn = get_db()
+                    log_status = f"DL: {download} Mbps | UL: {upload} Mbps | Ping: {ping} ms"
+                    conn.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)", (now, 'Gateway', 'Speedtest', log_status))
+                    
+                    st_data = json.dumps({
+                        'download': download,
+                        'upload': upload,
+                        'ping': ping,
+                        'isp': data.get('isp', 'Unknown'),
+                        'server': server_string,
+                        'timestamp': now
+                    })
+                    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('latest_speedtest', ?)", (st_data,))
+                    conn.commit()
+                    conn.close()
+                except Exception as e: print(f"DB Error saving speedtest: {e}")
+
+                socketio.emit('speedtest_result', {
+                    'success': True, 
+                    'download': f"{download} Mbps", 
+                    'upload': f"{upload} Mbps", 
+                    'ping': f"{ping} ms", 
+                    'isp': data.get('isp', 'Unknown'), 
+                    'server': server_string,
+                    'timestamp': now
+                })
             else: 
                 err_msg = process.stderr.strip() or "Unknown execution error."
                 try:
