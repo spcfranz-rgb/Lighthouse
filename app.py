@@ -461,9 +461,9 @@ def monitor_loop():
             for switch in switches:
                 switch_id, switch_name, switch_ip = switch['id'], switch['name'], switch['ip']
                 
-                # Use strict bracket notation
-                s_until = switch['silenced_until']
-                mac = switch['mac_address']
+                # SAFE NULL HANDLING
+                s_until = switch['silenced_until'] or 0
+                mac = switch['mac_address'] or ''
                 silenced = s_until > now
                 is_up = is_pingable(switch_ip) or is_port_open(switch_ip, 80) or is_port_open(switch_ip, 443)
                 
@@ -496,8 +496,9 @@ def monitor_loop():
                             conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
                     for cam in cameras:
-                        # Strict bracket notation for both database rows
-                        cam_silenced = (cam['silenced_until'] > now) or (switch['silenced_until'] > now)
+                        # SAFE NULL HANDLING
+                        c_until = cam['silenced_until'] or 0
+                        cam_silenced = (c_until > now) or silenced
     
                         cam_id, cam_name = cam['id'], cam['name']
                         cam_up, stream_ok, snap_bytes = camera_results[cam_id]
@@ -542,7 +543,20 @@ def monitor_loop():
                     cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
                     cameras = cursor.fetchall()
                     for cam in cameras:
-                        new_c_stat = 'UNREACHABLE (Switch Down)' if not silenced else 'UNREACHABLE (Silenced)'
+                        # SAFE NULL HANDLING
+                        c_until = cam['silenced_until'] or 0
+                        cam_silenced = (c_until > now) or silenced
+                        
+                        # PROPAGATE MQTT FOR DEAD SWITCH CAMERAS
+                        if cam_silenced:
+                            client.publish(f"{prefix}/{cam['name']}/ping", "MAINTENANCE", retain=True)
+                            client.publish(f"{prefix}/{cam['name']}/stream", "MAINTENANCE", retain=True)
+                            new_c_stat = 'UNREACHABLE (Silenced)'
+                        else:
+                            client.publish(f"{prefix}/{cam['name']}/ping", "OFFLINE", retain=True)
+                            client.publish(f"{prefix}/{cam['name']}/stream", "OFFLINE", retain=True)
+                            new_c_stat = 'UNREACHABLE (Switch Down)'
+                            
                         set_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
             # PROCESS STANDALONE CAMERAS
@@ -563,7 +577,10 @@ def monitor_loop():
                     conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
             for cam in standalone_cameras:
-                cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (cam['silenced_until'] > now)
+                # SAFE NULL HANDLING
+                c_until = cam['silenced_until'] or 0
+                cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (c_until > now)
+                
                 cam_up, stream_ok, snap_bytes = standalone_results[cam_id]
                 is_frozen = False
                 
@@ -608,13 +625,17 @@ def monitor_loop():
             time.sleep(10)
             continue
             
-        for _ in range(interval):
-            if os.path.exists(FORCE_CHECK_FLAG):
-                try: os.remove(FORCE_CHECK_FLAG)
-                except OSError: pass
-                break
-            time.sleep(1)
-
+        # NATIVE EVENTLET IPC SLEEP: Wait for interval, or instantly wake up if triggered
+        global force_check_event
+        try:
+            with eventlet.Timeout(interval):
+                force_check_event.wait()
+        except eventlet.Timeout:
+            pass # Timeout triggered normally, loop continues
+            
+        if force_check_event.ready():
+            force_check_event.reset()
+            
 # ==========================================
 # FLASK WEB ROUTES
 # ==========================================
@@ -694,13 +715,13 @@ def index():
     now = time.time()
     conn = get_db()
     
-    # 1. Fetch switches and their silenced status
-    switches = conn.execute("SELECT *, (silenced_until > ?) as is_silenced FROM switches", (now,)).fetchall()
+    # 1. Fetch switches and their silenced status with safe NULL casting
+    switches = conn.execute("SELECT *, (IFNULL(silenced_until, 0) > ?) as is_silenced FROM switches", (now,)).fetchall()
     
     # 2. Fetch cameras and inherit silenced status from parent switches
     cameras = conn.execute("""
         SELECT c.*, s.name as switch_name, 
-               ((c.silenced_until > ?) OR (s.silenced_until > ?)) as is_silenced 
+               ((IFNULL(c.silenced_until, 0) > ?) OR (IFNULL(s.silenced_until, 0) > ?)) as is_silenced 
         FROM cameras c 
         LEFT JOIN switches s ON c.switch_id = s.id
     """, (now, now)).fetchall()
