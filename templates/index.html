@@ -670,7 +670,7 @@
             document.getElementById('diagSpinner').classList.add('d-none');
         }
 
-        // Diagnostic Traceroute Script
+// Diagnostic Traceroute Script
         function runTrace() {
             const ipInput = document.getElementById('diagIp');
             const pBtn = document.getElementById('pingBtn');
@@ -687,18 +687,33 @@
             spinner.classList.remove('d-none');
             output.classList.add('d-none'); output.textContent = '';
 
+            // Clear any lingering trace timer before starting a new run
+            if (window.traceFallbackTimer) { clearTimeout(window.traceFallbackTimer); }
+
+            // Safety timeout (65 seconds: handles the 60s backend subprocess execution cap + network overhead)
+            window.traceFallbackTimer = setTimeout(() => {
+                output.textContent = 'Execution Timeout: The background traceroute worker did not respond within 65 seconds.';
+                output.classList.remove('text-success'); output.classList.add('text-danger');
+                output.classList.remove('d-none');
+                resetPingUI();
+            }, 65000);
+
             const formData = new FormData(); formData.append('target', ip);
 
             fetch('/api/traceroute', { method: 'POST', body: formData })
             .then(res => res.json())
             .then(data => {
                 if (data.status !== 'running') { throw new Error('Could not initialize trace worker.'); }
+                // The process is safely running in the background; the WebSocket event handler will handle completion.
             })
             .catch(err => {
+                // Clear the safety timer immediately if the initialization fetch fails
+                if (window.traceFallbackTimer) { clearTimeout(window.traceFallbackTimer); }
+                
                 output.textContent = 'Execution Error: ' + err.message;
                 output.classList.remove('text-success'); output.classList.add('text-danger');
                 output.classList.remove('d-none');
-                pBtn.disabled = false; tBtn.disabled = false; ipInput.disabled = false; spinner.classList.add('d-none');
+                resetPingUI();
             });
         }
         
