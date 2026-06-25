@@ -1,4 +1,4 @@
-# CRITICAL: Monkey patching must occur before ANY other imports to make standard libraries async-compatible
+# CRITICAL: Monkey patching must occur before ANY other imports
 import eventlet
 eventlet.monkey_patch()
 
@@ -31,8 +31,10 @@ from PIL import Image
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from urllib.parse import urlparse
 from functools import wraps
+
 from flask import Flask, render_template, request, redirect, url_for, abort, flash, Response, jsonify, send_from_directory
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_socketio import SocketIO
@@ -40,19 +42,39 @@ from authlib.integrations.flask_client import OAuth
 from cryptography.fernet import Fernet
 
 app = Flask(__name__)
-
 app.config['TEMPLATES_AUTO_RELOAD'] = True
-
-# Tell Flask it is behind a reverse proxy (NGINX/Headscale)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
-# Limit uploads to 2 Megabytes to prevent RAM exhaustion DoS attacks (CSV Bombing)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 
-# Initialize WebSockets with the eventlet async worker (Logs muted to hide Errno 9 disconnects)
+# --- SECURITY: CSRF PROTECTION & SESSIONS ---
+app.secret_key = os.environ.get('SECRET_KEY')
+if not app.secret_key:
+    print("WARNING: SECRET_KEY environment variable is missing. Using insecure development key.")
+    app.secret_key = 'cctv-super-secret-key-change-me'
+
+csrf = CSRFProtect(app)
+app.config['SESSION_COOKIE_HTTPONLY'] = True 
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').lower() == 'true'
+
+# --- SECURITY: CONTENT SECURITY POLICY (CSP) ---
+@app.after_request
+def apply_csp(response):
+    # Protects against XSS by strictly defining where resources can load from
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.socket.io; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: blob: http: https:; "
+        "connect-src 'self' ws: wss:; "
+        "object-src 'self' ws: wss:;"
+    )
+    response.headers['Content-Security-Policy'] = csp
+    return response
+
+# Initialize WebSockets
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
-# --- GLOBAL TEMPLATE VARIABLES (CO-BRANDING) ---
 LOCAL_COMPANY_LOGO = None
 LOCAL_CUSTOMER_LOGO = None
 
@@ -63,29 +85,16 @@ def inject_globals():
         'customer_logo': LOCAL_CUSTOMER_LOGO
     }
 
-# --- SECURITY HARDENING: SESSIONS & ENCRYPTION ---
-app.secret_key = os.environ.get('SECRET_KEY')
-if not app.secret_key:
-    print("WARNING: SECRET_KEY environment variable is missing. Using insecure development key.")
-    app.secret_key = 'cctv-super-secret-key-change-me'
-    
-app.config['SESSION_COOKIE_HTTPONLY'] = True 
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').lower() == 'true'
-
 def get_cipher():
-    """Derives a secure 32-byte Fernet key from the Flask SECRET_KEY."""
     key_bytes = app.secret_key.encode('utf-8')
     fernet_key = base64.urlsafe_b64encode(hashlib.sha256(key_bytes).digest())
     return Fernet(fernet_key)
 
 def encrypt_pwd(pwd):
-    """Encrypts plaintext passwords for database storage."""
     if not pwd: return ''
     return get_cipher().encrypt(pwd.encode('utf-8')).decode('utf-8')
 
 def decrypt_pwd(pwd):
-    """Decrypts database passwords into memory. Falls back to plaintext for legacy migration."""
     if not pwd: return ''
     try:
         return get_cipher().decrypt(pwd.encode('utf-8')).decode('utf-8')
@@ -115,11 +124,8 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# --- DATABASE PATHS ---
-DB_PATH_DISK = '/app/data/cctv.db'        # Persistent SD Card Storage
-DB_PATH_RAM = '/app/data_ram/cctv.db'     # High-Speed RAM Storage
-
-# Fast native IPC event (Replaces file-system check)
+DB_PATH_DISK = '/app/data/cctv.db'        
+DB_PATH_RAM = '/app/data_ram/cctv.db'     
 force_check_event = Event()
 
 class User(UserMixin):
@@ -152,7 +158,6 @@ def operator_required(f):
     return decorated_function
 
 def trigger_monitor_check():
-    """Wakes the background monitoring thread instantly."""
     global force_check_event
     if not force_check_event.ready():
         force_check_event.send(True)
@@ -161,12 +166,9 @@ def trigger_monitor_check():
 # DATABASE INITIALIZATION & RAM SYNC
 # ==========================================
 def init_ram_db():
-    """Safely loads the physical database into RAM on container boot using SQLite API."""
     os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
     os.makedirs(os.path.dirname(DB_PATH_DISK), exist_ok=True)
-    
     if os.path.exists(DB_PATH_DISK) and not os.path.exists(DB_PATH_RAM):
-        print("Restoring database from physical disk to RAM...")
         try:
             disk_conn = sqlite3.connect(DB_PATH_DISK)
             ram_conn = sqlite3.connect(DB_PATH_RAM)
@@ -178,10 +180,7 @@ def init_ram_db():
             print(f"Boot restoration failed: {e}")
 
 def get_db():
-    """All active connections point exclusively to the RAM disk."""
-    # Enforce directory creation immediately to prevent operational file errors
     os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
-    
     conn = sqlite3.connect(DB_PATH_RAM, check_same_thread=False, timeout=30)
     try: conn.execute("PRAGMA journal_mode=WAL;")
     except sqlite3.OperationalError: pass
@@ -189,31 +188,26 @@ def get_db():
     return conn
 
 def init_db():
-    init_ram_db() # Ensure RAM disk is populated first
+    init_ram_db() 
     conn = get_db()
     cursor = conn.cursor()
-    
     cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS switches (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, ip TEXT, status TEXT DEFAULT 'UNKNOWN')")
     cursor.execute("CREATE TABLE IF NOT EXISTS cameras (id INTEGER PRIMARY KEY AUTOINCREMENT, switch_id INTEGER, name TEXT UNIQUE, ip TEXT, stream_url TEXT, status TEXT DEFAULT 'UNKNOWN', FOREIGN KEY(switch_id) REFERENCES switches(id))")
     cursor.execute("CREATE TABLE IF NOT EXISTS event_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, device_type TEXT, device_name TEXT, status TEXT)")
-    
     try:
         cursor.execute("ALTER TABLE cameras ADD COLUMN manufacturer TEXT DEFAULT 'Other'")
         cursor.execute("ALTER TABLE cameras ADD COLUMN username TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE cameras ADD COLUMN password TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
-        
     try:
         cursor.execute("ALTER TABLE switches ADD COLUMN silenced_until REAL DEFAULT 0")
         cursor.execute("ALTER TABLE cameras ADD COLUMN silenced_until REAL DEFAULT 0")
     except sqlite3.OperationalError: pass
-
     try:
         cursor.execute("ALTER TABLE switches ADD COLUMN mac_address TEXT DEFAULT ''")
         cursor.execute("ALTER TABLE cameras ADD COLUMN mac_address TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
-
     cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, role TEXT)")
     
     cursor.execute("SELECT count(*) FROM settings")
@@ -235,31 +229,21 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("Database initialized in RAM.")
 
 def sync_db_loop():
-    """Background thread that safely dumps the RAM database back to the SD card every 5 minutes."""
-    print("Starting background SQLite sync thread...")
     while True:
-        time.sleep(300) # Wait 5 minutes
+        time.sleep(300) 
         if os.path.exists(DB_PATH_RAM):
             try:
                 source = sqlite3.connect(DB_PATH_RAM)
                 dest = sqlite3.connect(DB_PATH_DISK)
-                
-                # FIX: Force traditional journal mode on physical disk to prevent Docker Volume locking
                 dest.execute("PRAGMA journal_mode=DELETE;")
-                
-                with dest:
-                    source.backup(dest)
+                with dest: source.backup(dest)
                 dest.close()
                 source.close()
-            except Exception as e:
-                print(f"Failed to sync database to disk: {e}")
+            except Exception: pass
 
 def graceful_shutdown(*args):
-    """Fires when Docker stops the container to save the RAM disk to the SD Card."""
-    print("Container shutting down. Forcing final database sync to disk...")
     if os.path.exists(DB_PATH_RAM):
         try:
             source = sqlite3.connect(DB_PATH_RAM)
@@ -267,38 +251,40 @@ def graceful_shutdown(*args):
             with dest: source.backup(dest)
             dest.close()
             source.close()
-            print("Final sync complete. Safe to exit.")
-        except Exception as e: print(f"Emergency Sync Failed: {e}")
+        except Exception: pass
 
 atexit.register(graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
 signal.signal(signal.SIGINT, graceful_shutdown)
 
 def log_prune_loop():
-    """Background thread to safely prune old logs once a day."""
-    print("Starting daily database pruning thread...")
     while True:
-        time.sleep(86400) # Sleep for 24 hours
+        time.sleep(86400) 
         try:
             conn = get_db()
             seven_days_ago = time.time() - (7 * 24 * 3600)
             conn.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
             conn.commit()
             conn.close()
-            print("Successfully pruned logs older than 7 days.")
-        except Exception as e:
-            print(f"Failed to prune logs: {e}")
+        except Exception: pass
 
 # ==========================================
 # BACKGROUND MONITORING & NETWORK TASKS
 # ==========================================
-
-# --- CPU THROTTLE ---
-# Restrict CPU-heavy ffmpeg tasks to 4 concurrent threads to maximize Pi 5 Quad-Core hardware
 SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(4)
 
+def get_local_subnet():
+    """Detects the primary local subnet automatically to pre-fill the UI."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return f"{local_ip.rsplit('.', 1)[0]}.0/24"
+    except Exception:
+        return "192.168.1.0/24"
+
 def is_valid_target(target):
-    """Sanitizes user input to prevent Argument Injection and DoS."""
     if not target: return False
     target = str(target).strip()
     if target.startswith('-'): return False
@@ -310,7 +296,6 @@ def is_valid_target(target):
     return False
 
 def is_pingable(target):
-    # Halved ping timeout (-W 1) for rapid local discovery
     response = subprocess.call(['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return response == 0
 
@@ -326,7 +311,6 @@ def is_stream_active(url):
     except subprocess.TimeoutExpired: return False
 
 def get_mac_address(ip):
-    """Native, Docker-safe ARP cache reader bypasses legacy pip libraries."""
     try:
         with open('/proc/net/arp', 'r') as f:
             for line in f.readlines()[1:]:
@@ -335,35 +319,21 @@ def get_mac_address(ip):
                     mac = parts[3]
                     if mac != "00:00:00:00:00:00":
                         return mac.upper()
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError: pass
     return None
 
 def get_camlan_arp_table():
-    """Reads the raw Linux ARP cache directly from the kernel across all interfaces."""
     arp_entries = []
-    
     try:
         with open('/proc/net/arp', 'r') as f:
-            lines = f.readlines()[1:] # Skip the header row
-            
+            lines = f.readlines()[1:] 
             for line in lines:
                 parts = line.split()
                 if len(parts) >= 6:
-                    ip = parts[0]
-                    mac = parts[3]
-                    interface = parts[5]
-
-                    # Filter out empty/null MAC addresses, but allow ALL interfaces
+                    ip, mac, interface = parts[0], parts[3], parts[5]
                     if mac != "00:00:00:00:00:00":
-                        arp_entries.append({
-                            "ip": ip,
-                            "mac": mac.upper(),
-                            "interface": interface
-                        })
-    except FileNotFoundError:
-        print("CRITICAL: /proc/net/arp not found. Ensure Docker is using network_mode: host")
-        
+                        arp_entries.append({"ip": ip, "mac": mac.upper(), "interface": interface})
+    except FileNotFoundError: pass
     return arp_entries
 
 def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
@@ -397,21 +367,16 @@ def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
 
 def threaded_camera_check(cam):
     cam_up = is_pingable(cam['ip']) or is_port_open(cam['ip'], 554) or is_port_open(cam['ip'], 80)
-    stream_ok = False
-    snap_bytes = None
+    stream_ok, snap_bytes, fetched_mac = False, None, None
     mac = cam.get('mac_address', '')
-    fetched_mac = None
     
     if cam_up:
-        # ARP Sweep for MAC Address (Requires Docker Host Network Mode)
         if not mac:
             new_mac = get_mac_address(cam['ip'])
-            if new_mac:
-                fetched_mac = new_mac.upper()
+            if new_mac: fetched_mac = new_mac.upper()
 
         stream_ok = is_stream_active(cam['stream_url'])
         if stream_ok:
-            # SECURE THE CPU: Threads must acquire this lock before decoding video
             with SNAPSHOT_SEMAPHORE:
                 snap_bytes = get_snapshot_bytes(cam['ip'], cam['manufacturer'], cam['username'], cam['password'], cam['stream_url'])
                 
@@ -419,7 +384,6 @@ def threaded_camera_check(cam):
 
 def monitor_loop():
     global force_check_event
-    print("Starting concurrent background monitoring thread...")
     previous_hashes = {} 
     
     conn = get_db()
@@ -434,8 +398,7 @@ def monitor_loop():
     try:
         client.connect(broker, port, 60)
         client.loop_start()
-    except Exception as e:
-        print(f"Initial MQTT connection failed: {e}")
+    except Exception: pass
         
     while True:
         try:
@@ -457,16 +420,12 @@ def monitor_loop():
             dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
             interval = int(dynamic_settings.get('check_interval', 60))
             
-            # PROCESS SWITCHES
+            # --- SWITCHES ---
             cursor.execute("SELECT * FROM switches")
             switches = cursor.fetchall()
-            
             for switch in switches:
                 switch_id, switch_name, switch_ip = switch['id'], switch['name'], switch['ip']
-                
-                # SAFE NULL HANDLING
-                s_until = switch['silenced_until'] or 0
-                mac = switch['mac_address'] or ''
+                s_until, mac = switch['silenced_until'] or 0, switch['mac_address'] or ''
                 silenced = s_until > now
                 is_up = is_pingable(switch_ip) or is_port_open(switch_ip, 80) or is_port_open(switch_ip, 443)
                 
@@ -476,15 +435,13 @@ def monitor_loop():
                 if is_up:
                     if not mac:
                         fetched_mac = get_mac_address(switch_ip)
-                        if fetched_mac:
-                            conn.execute("UPDATE switches SET mac_address = ? WHERE id = ?", (fetched_mac.upper(), switch_id))
+                        if fetched_mac: conn.execute("UPDATE switches SET mac_address = ? WHERE id = ?", (fetched_mac.upper(), switch_id))
                             
                     new_s_stat = 'UP' if not silenced else 'UP (Silenced)'
                     set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
                     
                     cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
                     cameras = cursor.fetchall()
-                    
                     camera_list = []
                     for c in cameras:
                         cd = dict(c)
@@ -495,14 +452,11 @@ def monitor_loop():
                     pool = eventlet.greenpool.GreenPool(size=20)
                     for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in pool.imap(threaded_camera_check, camera_list):
                         camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
-                        if fetched_mac:
-                            conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
+                        if fetched_mac: conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
                     for cam in cameras:
-                        # SAFE NULL HANDLING
                         c_until = cam['silenced_until'] or 0
                         cam_silenced = (c_until > now) or silenced
-    
                         cam_id, cam_name = cam['id'], cam['name']
                         cam_up, stream_ok, snap_bytes = camera_results[cam_id]
                         is_frozen = False
@@ -513,16 +467,11 @@ def monitor_loop():
                                     img = Image.open(io.BytesIO(snap_bytes))
                                     current_hash = imagehash.average_hash(img)
                                     last_hash = previous_hashes.get(cam_id)
-                                    
-                                    # Fix: Only check for freezing if the camera was previously UP
                                     if last_hash is not None and cam['status'] == 'UP' and (current_hash - last_hash) <= 2: 
                                         is_frozen = True
-                                        
                                     previous_hashes[cam_id] = current_hash
                                 except Exception: pass
-                            else:
-                                # Clear the hash cache if the stream drops so it doesn't lock up upon recovery
-                                previous_hashes.pop(cam_id, None)
+                            else: previous_hashes.pop(cam_id, None)
                             
                             if cam_silenced:
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
@@ -549,15 +498,10 @@ def monitor_loop():
                 else:
                     new_s_stat = 'DOWN' if not silenced else 'DOWN (Silenced)'
                     set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
-                    
                     cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
-                    cameras = cursor.fetchall()
-                    for cam in cameras:
-                        # SAFE NULL HANDLING
+                    for cam in cursor.fetchall():
                         c_until = cam['silenced_until'] or 0
                         cam_silenced = (c_until > now) or silenced
-                        
-                        # PROPAGATE MQTT FOR DEAD SWITCH CAMERAS
                         if cam_silenced:
                             client.publish(f"{prefix}/{cam['name']}/ping", "MAINTENANCE", retain=True)
                             client.publish(f"{prefix}/{cam['name']}/stream", "MAINTENANCE", retain=True)
@@ -566,13 +510,11 @@ def monitor_loop():
                             client.publish(f"{prefix}/{cam['name']}/ping", "OFFLINE", retain=True)
                             client.publish(f"{prefix}/{cam['name']}/stream", "OFFLINE", retain=True)
                             new_c_stat = 'UNREACHABLE (Switch Down)'
-                            
                         set_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
-            # PROCESS STANDALONE CAMERAS
+            # --- STANDALONE CAMERAS ---
             cursor.execute("SELECT * FROM cameras WHERE switch_id IS NULL OR switch_id = ''")
             standalone_cameras = cursor.fetchall()
-            
             standalone_list = []
             for c in standalone_cameras:
                 cd = dict(c)
@@ -583,14 +525,11 @@ def monitor_loop():
             standalone_pool = eventlet.greenpool.GreenPool(size=20)
             for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in standalone_pool.imap(threaded_camera_check, standalone_list):
                 standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
-                if fetched_mac:
-                    conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
+                if fetched_mac: conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
             for cam in standalone_cameras:
-                # SAFE NULL HANDLING
                 c_until = cam['silenced_until'] or 0
                 cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (c_until > now)
-                
                 cam_up, stream_ok, snap_bytes = standalone_results[cam_id]
                 is_frozen = False
                 
@@ -600,16 +539,11 @@ def monitor_loop():
                             img = Image.open(io.BytesIO(snap_bytes))
                             current_hash = imagehash.average_hash(img)
                             last_hash = previous_hashes.get(cam_id)
-                            
-                            # Fix: Only check for freezing if the camera was previously UP
                             if last_hash is not None and cam['status'] == 'UP' and (current_hash - last_hash) <= 2: 
                                 is_frozen = True
-                                
                             previous_hashes[cam_id] = current_hash
                         except Exception: pass
-                    else:
-                        # Clear the hash cache if the stream drops
-                        previous_hashes.pop(cam_id, None)
+                    else: previous_hashes.pop(cam_id, None)
                             
                     if cam_silenced:
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
@@ -636,21 +570,13 @@ def monitor_loop():
 
             conn.commit()
             conn.close()
+        except Exception: time.sleep(10)
             
-        except Exception as e:
-            print(f"Error in monitor loop: {e}")
-            time.sleep(10)
-            
-        # NATIVE EVENTLET IPC SLEEP: Wait for interval, or instantly wake up if triggered
         try:
-            with eventlet.Timeout(interval):
-                force_check_event.wait()
-        except eventlet.Timeout:
-            pass # Timeout triggered normally, loop continues
+            with eventlet.Timeout(interval): force_check_event.wait()
+        except eventlet.Timeout: pass 
             
-        # EVENTLET EVENTS ARE ONE-SHOT. We must re-instantiate, NOT reset.
-        if force_check_event.ready():
-            force_check_event = Event()
+        if force_check_event.ready(): force_check_event = Event()
 
 # ==========================================
 # FLASK WEB ROUTES
@@ -662,7 +588,6 @@ def serve_local_logo(filename):
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     fallback = request.args.get('fallback') == 'true'
-    
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -671,8 +596,7 @@ def login():
         conn.close()
         
         if user and check_password_hash(user['password'], password):
-            user_obj = User(user['id'], user['username'], user['role'])
-            login_user(user_obj)
+            login_user(User(user['id'], user['username'], user['role']))
             return redirect(url_for('index'))
         else:
             flash('Invalid local username or password', 'danger')
@@ -681,8 +605,7 @@ def login():
     if AUTHENTIK_URL and not fallback:
         try:
             requests.get(f"{AUTHENTIK_URL.rstrip('/')}/-/health/ready/", timeout=1.5)
-            redirect_uri = url_for('auth_callback', _external=True)
-            return oauth.authentik.authorize_redirect(redirect_uri)
+            return oauth.authentik.authorize_redirect(url_for('auth_callback', _external=True))
         except requests.RequestException:
             flash('Authentik SSO server is unreachable. Emergency Local Access enabled.', 'warning')
             fallback = True
@@ -700,9 +623,7 @@ def auth_callback():
     
     username = user_info.get('preferred_username') or user_info.get('name') or user_info.get('email')
     groups = user_info.get('groups', [])
-    role = 'user'
-    if 'cctv-admins' in groups: role = 'admin'
-    elif 'cctv-operators' in groups: role = 'operator'
+    role = 'admin' if 'cctv-admins' in groups else ('operator' if 'cctv-operators' in groups else 'user')
         
     conn = get_db()
     db_user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -715,7 +636,6 @@ def auth_callback():
         
     conn.commit()
     conn.close()
-    
     login_user(User(user_id, username, role))
     return redirect(url_for('index'))
 
@@ -730,16 +650,11 @@ def logout():
 def index():
     now = time.time()
     conn = get_db()
-    
-    # 1. Fetch switches and their silenced status with safe NULL casting
     switches = conn.execute("SELECT *, (IFNULL(silenced_until, 0) > ?) as is_silenced FROM switches", (now,)).fetchall()
-    
-    # 2. Fetch cameras and inherit silenced status from parent switches
     cameras = conn.execute("""
         SELECT c.*, s.name as switch_name, 
                ((IFNULL(c.silenced_until, 0) > ?) OR (IFNULL(s.silenced_until, 0) > ?)) as is_silenced 
-        FROM cameras c 
-        LEFT JOIN switches s ON c.switch_id = s.id
+        FROM cameras c LEFT JOIN switches s ON c.switch_id = s.id
     """, (now, now)).fetchall()
     
     cursor = conn.cursor()
@@ -748,7 +663,9 @@ def index():
     users = conn.execute("SELECT id, username, role FROM users").fetchall()
     conn.close()
     
-    return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users)
+    default_subnet = get_local_subnet()
+    
+    return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users, default_subnet=default_subnet)
     
 @app.route('/history')
 @login_required
@@ -788,7 +705,6 @@ def export_config():
         SELECT c.name, c.ip, c.stream_url, c.manufacturer, c.username, c.password, s.name as switch_name 
         FROM cameras c LEFT JOIN switches s ON c.switch_id = s.id
     """).fetchall()
-    
     for c in cameras:
         parent = c['switch_name'] if c['switch_name'] else 'None'
         cw.writerow(['Camera', parent, c['name'], c['ip'], c['stream_url'], c['manufacturer'], c['username'], decrypt_pwd(c['password'])])
@@ -804,10 +720,6 @@ def download_template():
     cw = csv.writer(si)
     cw.writerow(['Device_Type', 'Parent_Switch', 'Device_Name', 'IP_Address', 'Stream_URL', 'Manufacturer', 'Username', 'Password'])
     cw.writerow(['Switch', '', 'Core-Switch-01', '192.168.1.5', '', '', '', ''])
-    cw.writerow(['Switch', '', 'Edge-PoE-North', '10.0.0.15', '', '', '', ''])
-    cw.writerow(['Camera', 'Core-Switch-01', 'Lobby-Cam-01', '192.168.1.100', 'rtsp://192.168.1.100:554/stream1', 'Hanwha', 'admin', 'SecurePassword123'])
-    cw.writerow(['Camera', 'Edge-PoE-North', 'Parking-PTZ', '10.0.0.20', 'rtsp://10.0.0.20:554/cam/realmonitor', 'Dahua', 'admin', 'SecurePassword123'])
-    cw.writerow(['Camera', 'None', 'Standalone-WiFi-Cam', '192.168.5.50', 'rtsp://192.168.5.50:554/11', 'Other', '', ''])
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=cctv_import_template.csv"})
 
 @app.route('/import_config', methods=['POST'])
@@ -834,8 +746,7 @@ def import_config():
         for row in rows:
             dtype = row.get('Device_Type', '').strip().lower()
             if dtype == 'switch':
-                name = row.get('Device_Name', '').strip()
-                ip = row.get('IP_Address', '').strip()
+                name, ip = row.get('Device_Name', '').strip(), row.get('IP_Address', '').strip()
                 if name:
                     existing = conn.execute("SELECT id FROM switches WHERE name = ?", (name,)).fetchone()
                     if existing:
@@ -857,7 +768,6 @@ def import_config():
                 pwd = encrypt_pwd(row.get('Password', '').strip())
                 
                 if not name: continue
-                    
                 switch_id = None
                 if parent_switch and parent_switch.lower() != 'none':
                     switch_id = switch_map.get(parent_switch)
@@ -867,40 +777,24 @@ def import_config():
                         switch_map[parent_switch] = switch_id
 
                 existing = conn.execute("SELECT id FROM cameras WHERE name = ?", (name,)).fetchone()
-                if existing:
-                    conn.execute("""UPDATE cameras SET switch_id=?, ip=?, stream_url=?, manufacturer=?, username=?, password=? WHERE id=?""",
-                                 (switch_id, ip, url, mfg, user, pwd, existing['id']))
-                else:
-                    conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                                 (switch_id, name, ip, url, mfg, user, pwd))
+                if existing: conn.execute("""UPDATE cameras SET switch_id=?, ip=?, stream_url=?, manufacturer=?, username=?, password=? WHERE id=?""", (switch_id, ip, url, mfg, user, pwd, existing['id']))
+                else: conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", (switch_id, name, ip, url, mfg, user, pwd))
 
         conn.commit()
         conn.close()
         trigger_monitor_check()
-        flash('CSV Configuration imported successfully. Devices have been merged.', 'success')
-    except Exception as e:
-        flash(f'Error importing CSV: Invalid format or missing headers. ({str(e)})', 'danger')
-
+        flash('CSV Configuration imported successfully.', 'success')
+    except Exception as e: flash(f'Error importing CSV: {str(e)}', 'danger')
     return redirect(url_for('index'))
 
 @app.route('/api/network/arp', methods=['GET'])
 @login_required
 @operator_required
 def fetch_arp_table():
-    """REST endpoint for the frontend UI to poll active cameras on the LAN."""
     try:
         devices = get_camlan_arp_table()
-        return jsonify({
-            "status": "success",
-            "count": len(devices),
-            "interface_scanned": "All Interfaces", 
-            "devices": devices
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "success", "count": len(devices), "interface_scanned": "All Interfaces", "devices": devices}), 200
+    except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/scan_network', methods=['POST'])
 @login_required
@@ -908,9 +802,8 @@ def fetch_arp_table():
 def scan_network():
     subnet = request.form.get('subnet')
     if not subnet: return jsonify({'success': False, 'error': 'No subnet provided.'})
-        
     try: network = ipaddress.ip_network(subnet, strict=False)
-    except ValueError: return jsonify({'success': False, 'error': 'Invalid subnet format. Use CIDR notation (e.g., 192.168.1.0/24)'})
+    except ValueError: return jsonify({'success': False, 'error': 'Invalid subnet format.'})
 
     hosts = [str(ip) for ip in network.hosts()]
     if len(hosts) > 1024: return jsonify({'success': False, 'error': 'Subnet too large. Please scan a /22 or smaller.'})
@@ -918,7 +811,7 @@ def scan_network():
     def check_rtsp_port(ip):
         try:
             with socket.create_connection((ip, 554), timeout=1.5): return ip
-        except (socket.timeout, ConnectionRefusedError, OSError): return None
+        except Exception: return None
 
     discovered_ips = []
     pool = eventlet.greenpool.GreenPool(size=100)
@@ -930,13 +823,7 @@ def scan_network():
     conn.close()
     
     new_discoveries = [ip for ip in discovered_ips if ip not in existing_cameras]
-
-    return jsonify({
-        'success': True, 
-        'discovered': new_discoveries,
-        'total_found': len(discovered_ips),
-        'already_added': len(discovered_ips) - len(new_discoveries)
-    })
+    return jsonify({'success': True, 'discovered': new_discoveries, 'total_found': len(discovered_ips), 'already_added': len(discovered_ips) - len(new_discoveries)})
 
 @app.route('/api/add_cameras_bulk', methods=['POST'])
 @login_required
@@ -945,23 +832,16 @@ def add_cameras_bulk():
     data = request.json
     if not data or not data.get('ips'): return jsonify({'success': False, 'error': 'No IP addresses selected.'})
 
-    ips = data['ips']
-    switch_id = data.get('switch_id') or None
-    mfg = data.get('manufacturer', 'Other')
-    user = data.get('username', '')
-    pwd = encrypt_pwd(data.get('password', ''))
+    ips, switch_id = data['ips'], data.get('switch_id') or None
+    mfg, user, pwd = data.get('manufacturer', 'Other'), data.get('username', ''), encrypt_pwd(data.get('password', ''))
 
     conn = get_db()
-    added_count = 0
-    errors = []
-
+    added_count, errors = 0, []
     for ip in ips:
         name = f"AutoCam-{ip.replace('.', '-')}"
         stream_url = f"rtsp://{ip}:554/live"
         try:
-            conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) 
-                            VALUES (?, ?, ?, ?, ?, ?, ?)""", 
-                         (switch_id, name, ip, stream_url, mfg, user, pwd))
+            conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", (switch_id, name, ip, stream_url, mfg, user, pwd))
             added_count += 1
         except sqlite3.IntegrityError: errors.append(ip)
 
@@ -989,17 +869,11 @@ def toggle_silence(device_type, id):
 @operator_required
 def manual_ping():
     ip = request.form.get('ip')
-    
-    # --- SECURITY PATCH: Validate Input to prevent Argument Injection ---
-    if not is_valid_target(ip): 
-        return jsonify({'success': False, 'output': 'Security Error: Invalid IP address or hostname format.'})
-    
+    if not is_valid_target(ip): return jsonify({'success': False, 'output': 'Security Error: Invalid target format.'})
     try:
         cmd = ['ping', '-c', '4', '-W', '2', ip.strip()]
         process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-        if process.returncode == 0: return jsonify({'success': True, 'output': process.stdout})
-        else: return jsonify({'success': False, 'output': process.stdout or process.stderr or 'Ping failed.'})
-    except subprocess.TimeoutExpired: return jsonify({'success': False, 'output': 'Ping command timed out.'})
+        return jsonify({'success': process.returncode == 0, 'output': process.stdout or process.stderr or 'Ping failed.'})
     except Exception as e: return jsonify({'success': False, 'output': str(e)})
 
 @app.route('/api/traceroute', methods=['POST'])
@@ -1007,87 +881,44 @@ def manual_ping():
 @operator_required
 def run_traceroute():
     target = request.form.get('target')
-    
-    # --- SECURITY PATCH: Validate Input to prevent Argument Injection ---
-    if not is_valid_target(target): 
-        return jsonify({'success': False, 'error': 'Security Error: Invalid IP address or hostname format.'})
+    if not is_valid_target(target): return jsonify({'success': False, 'error': 'Security Error: Invalid target format.'})
 
     def execute_trace():
         try:
             cmd = ['traceroute', '-w', '2', '-m', '30', '-q', '1', target.strip()]
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            
-            if process.returncode == 0:
-                socketio.emit('traceroute_result', {'success': True, 'output': process.stdout})
-            else:
-                error_msg = process.stderr.strip() or process.stdout.strip() or "Unknown execution error."
-                socketio.emit('traceroute_result', {'success': False, 'error': error_msg})
-                
-        except subprocess.TimeoutExpired:
-            socketio.emit('traceroute_result', {'success': False, 'error': 'Traceroute timed out after 60 seconds.'})
-        except Exception as e:
-            socketio.emit('traceroute_result', {'success': False, 'error': f'System Error: {str(e)}'})
+            if process.returncode == 0: socketio.emit('traceroute_result', {'success': True, 'output': process.stdout})
+            else: socketio.emit('traceroute_result', {'success': False, 'error': process.stderr.strip() or process.stdout.strip()})
+        except subprocess.TimeoutExpired: socketio.emit('traceroute_result', {'success': False, 'error': 'Traceroute timed out.'})
+        except Exception as e: socketio.emit('traceroute_result', {'success': False, 'error': str(e)})
 
     threading.Thread(target=execute_trace).start()
     return jsonify({'status': 'running'})
 
-# --- NATIVE OOKLA SPEEDTEST WITH SERVER TRACKING ---
 @app.route('/api/speedtest', methods=['POST'])
 @login_required
 @operator_required
 def run_speedtest():
     def execute_test():
         try:
-            # FIX: Added --accept-license and --accept-gdpr to prevent interactive hangs
             cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
-            
-            # The rest of the function remains the same
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            
-            # ...
-            
             if process.returncode == 0:
                 data = json.loads(process.stdout)
-                
                 download = round((data['download']['bandwidth'] * 8) / 1000000, 2)
                 upload = round((data['upload']['bandwidth'] * 8) / 1000000, 2)
                 ping = round(data['ping']['latency'], 1)
-                isp = data.get('isp', 'Unknown')
-                
-                # Extract Target Server Information
-                server_info = data.get('server', {})
-                server_name = server_info.get('name', 'Unknown Server')
-                server_loc = server_info.get('location', 'Unknown Location')
-                server_string = f"{server_name} ({server_loc})"
-                
-                socketio.emit('speedtest_result', {
-                    'success': True, 
-                    'download': f"{download} Mbps", 
-                    'upload': f"{upload} Mbps", 
-                    'ping': f"{ping} ms", 
-                    'isp': isp,
-                    'server': server_string
-                })
+                server_string = f"{data.get('server', {}).get('name', 'Unknown')} ({data.get('server', {}).get('location', 'Unknown')})"
+                socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string})
             else: 
-                error_msg = process.stderr.strip() or process.stdout.strip() or "Unknown execution error."
-                
-                # Fallback: Capture nearby servers if the test fails to connect
+                err_msg = process.stderr.strip() or "Unknown execution error."
                 try:
                     fallback = subprocess.run(['speedtest', '-L', '-f', 'json'], capture_output=True, text=True, timeout=10)
-                    fallback_data = json.loads(fallback.stdout)
-                    servers = fallback_data.get('servers', [])
-                    if servers:
-                        server_list = ", ".join([f"{s['name']} ({s['location']})" for s in servers[:3]])
-                        error_msg += f" | Available Nearby Servers: {server_list}"
-                except Exception:
-                    pass
-                    
-                socketio.emit('speedtest_result', {'success': False, 'error': f'Speedtest CLI Error: {error_msg}'})
-                
-        except subprocess.TimeoutExpired: 
-            socketio.emit('speedtest_result', {'success': False, 'error': 'Speedtest timed out after 60 seconds.'})
-        except Exception as e: 
-            socketio.emit('speedtest_result', {'success': False, 'error': str(e)})
+                    servers = json.loads(fallback.stdout).get('servers', [])
+                    if servers: err_msg += " | Available Nearby Servers: " + ", ".join([f"{s['name']} ({s['location']})" for s in servers[:3]])
+                except Exception: pass
+                socketio.emit('speedtest_result', {'success': False, 'error': err_msg})
+        except Exception as e: socketio.emit('speedtest_result', {'success': False, 'error': str(e)})
 
     threading.Thread(target=execute_test).start()
     return jsonify({'status': 'running'})
@@ -1104,7 +935,7 @@ def update_settings():
     conn.commit()
     conn.close()
     trigger_monitor_check()
-    flash('Settings updated. Immediate network scan triggered.', 'success')
+    flash('Settings updated.', 'success')
     return redirect(url_for('index'))
 
 @app.route('/test_alert', methods=['POST'])
@@ -1112,22 +943,15 @@ def update_settings():
 @admin_required
 def test_alert():
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT key, value FROM settings")
-    settings_dict = {row['key']: row['value'] for row in cursor.fetchall()}
+    settings_dict = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
     conn.close()
-    broker = settings_dict.get('mqtt_broker', '127.0.0.1')
-    port = int(settings_dict.get('mqtt_port', 1883))
-    prefix = settings_dict.get('mqtt_prefix', 'zabbix/cctv')
-    
     try:
         client = mqtt.Client("camera_monitor_test")
-        client.connect(broker, port, 5)
-        test_topic = f"{prefix}/test_device/ping"
-        client.publish(test_topic, "TEST_PING", retain=False)
+        client.connect(settings_dict.get('mqtt_broker', '127.0.0.1'), int(settings_dict.get('mqtt_port', 1883)), 5)
+        client.publish(f"{settings_dict.get('mqtt_prefix', 'zabbix/cctv')}/test_device/ping", "TEST_PING", retain=False)
         client.disconnect()
-        flash(f'Success! Test alert sent to {test_topic}', 'success')
-    except Exception as e: flash(f'MQTT Error: Could not reach broker at {broker}:{port}. ({str(e)})', 'danger')
+        flash(f'Test alert sent.', 'success')
+    except Exception as e: flash(f'MQTT Error: {str(e)}', 'danger')
     return redirect(url_for('index'))
 
 @app.route('/add_switch', methods=['POST'])
@@ -1140,7 +964,7 @@ def add_switch():
         conn.commit()
         trigger_monitor_check()
         flash('Switch added.', 'success')
-    except sqlite3.IntegrityError: flash('Error: A switch with that name already exists.', 'danger')
+    except sqlite3.IntegrityError: flash('Switch name already exists.', 'danger')
     finally: conn.close()
     return redirect(url_for('index'))
 
@@ -1157,13 +981,13 @@ def edit_switch(id):
             flash('Switch updated.', 'success')
             conn.close()
             return redirect(url_for('index'))
-        except sqlite3.IntegrityError: flash('Error: A switch with that name already exists.', 'danger')
-            
+        except sqlite3.IntegrityError: flash('Switch name already exists.', 'danger')
     switch = conn.execute("SELECT * FROM switches WHERE id = ?", (id,)).fetchone()
     conn.close()
     return render_template('edit_switch.html', switch=switch)
 
-@app.route('/delete_switch/<int:id>')
+# SECURED: Converted destructive actions from GET to POST
+@app.route('/delete_switch/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_switch(id):
@@ -1180,8 +1004,7 @@ def delete_switch(id):
 @login_required
 @admin_required
 def add_camera():
-    switch_id = request.form.get('switch_id')
-    switch_id = switch_id if switch_id else None
+    switch_id = request.form.get('switch_id') or None
     conn = get_db()
     try:
         conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", 
@@ -1189,7 +1012,7 @@ def add_camera():
         conn.commit()
         trigger_monitor_check()
         flash('Camera added.', 'success')
-    except sqlite3.IntegrityError: flash('Error: A camera with that name already exists.', 'danger')
+    except sqlite3.IntegrityError: flash('Camera name already exists.', 'danger')
     finally: conn.close()
     return redirect(url_for('index'))
 
@@ -1199,8 +1022,7 @@ def add_camera():
 def edit_camera(id):
     conn = get_db()
     if request.method == 'POST':
-        switch_id = request.form.get('switch_id')
-        switch_id = switch_id if switch_id else None 
+        switch_id = request.form.get('switch_id') or None 
         try:
             conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
                          (switch_id, request.form['name'], request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', '')), id))
@@ -1209,18 +1031,18 @@ def edit_camera(id):
             flash('Camera updated.', 'success')
             conn.close()
             return redirect(url_for('index'))
-        except sqlite3.IntegrityError: flash('Error: A camera with that name already exists.', 'danger')
+        except sqlite3.IntegrityError: flash('Camera name already exists.', 'danger')
     
     camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (id,)).fetchone()
     if camera:
         camera = dict(camera)
-        camera['password'] = decrypt_pwd(camera['password']) # Decrypt for the HTML form display
-        
+        camera['password'] = decrypt_pwd(camera['password']) 
     switches = conn.execute("SELECT * FROM switches").fetchall()
     conn.close()
     return render_template('edit_camera.html', camera=camera, switches=switches)
 
-@app.route('/delete_camera/<int:id>')
+# SECURED: Converted destructive actions from GET to POST
+@app.route('/delete_camera/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_camera(id):
@@ -1248,7 +1070,8 @@ def add_user():
     conn.close()
     return redirect(url_for('index'))
 
-@app.route('/delete_user/<int:id>')
+# SECURED: Converted destructive actions from GET to POST
+@app.route('/delete_user/<int:id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_user(id):
@@ -1296,18 +1119,12 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
     query_string = request.query_string.decode('utf-8')
     full_req_path = f"{req_path}?{query_string}" if query_string else req_path
     
-    # Strip headers that break proxying
     clean_headers = {k: v for k, v in headers if k.lower() not in ['host', 'origin', 'referer', 'accept-encoding']}
     clean_headers['Host'] = device['ip']
-    
-    # Default to standard HTTP
     target_url = f"http://{resolved_ip}/{full_req_path.lstrip('/')}"
     
     try:
-        # 1. Attempt standard HTTP request
         resp = requests.request(method=method, url=target_url, headers=clean_headers, data=data, cookies=cookies, allow_redirects=False, stream=True, timeout=10, verify=False)
-        
-        # 2. Transparent HTTPS Upgrade
         if resp.status_code in [301, 302, 307, 308]:
             loc = resp.headers.get('Location', '')
             if loc.startswith(f"https://{device['ip']}") or loc.startswith(f"https://{resolved_ip}"):
@@ -1317,7 +1134,6 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         resp_headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
         
-        # 3. HTTP Header Rewrite
         for i, (name, value) in enumerate(resp_headers):
             if name.lower() == 'location':
                 parsed = urlparse(value)
@@ -1328,26 +1144,16 @@ def proxy_request(device_type, device_id, req_path, method, headers, data, cooki
                 elif not parsed.hostname and value.startswith('/'):
                     resp_headers[i] = (name, f"/tunnel/{device_type}/{device_id}{value}")
 
-        # 4. Aggressive Deep-Payload IP Scrubbing & Gravity Well
         content_type = resp.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type or 'javascript' in content_type or 'json' in content_type:
             payload = resp.content.decode('utf-8', errors='ignore')
-            
-            # Scrub absolute protocol wrappers (Includes WebSockets ws:// and wss://)
             payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
-            payload = re.sub(rf"(https?|wss?):\\/\\/{re.escape(device['ip'])}(:\d+)?", f"http:\\/\\/{request.host}/tunnel/{device_type}/{device_id}", payload)
-            
-            # FAST NATIVE STRING REPLACEMENT: Replace naked IPs 
             payload = payload.replace(device['ip'], f"{request.host}/tunnel/{device_type}/{device_id}")
-            
-            # INJECT BASE TAG: Forces all relative links to stay inside the tunnel automatically
             if 'text/html' in content_type:
                 base_tag = f'<base href="/tunnel/{device_type}/{device_id}/">\n'
                 payload = re.sub(r'(<head[^>]*>)', rf'\1\n{base_tag}', payload, flags=re.IGNORECASE)
-            
             return Response(payload, resp.status_code, resp_headers)
         else:
-            # Stream binary data (Video, Images, Firmware files) untouched for max performance
             return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
             
     except requests.exceptions.RequestException as e:
@@ -1363,9 +1169,7 @@ def tunnel(device_type, device_id, req_path):
 @app.errorhandler(404)
 def proxy_absolute_paths(e):
     if not current_user.is_authenticated: return "404 - Not Found", 404
-    # Ensure unauthorized users can't bypass the proxy lock via 404 fallback
     if current_user.role not in ['admin', 'operator']: return "403 - Forbidden", 403 
-    
     referer = request.headers.get('Referer')
     if referer:
         parsed_referer = urlparse(referer)
@@ -1374,58 +1178,37 @@ def proxy_absolute_paths(e):
             return proxy_request(parts[2], parts[3], request.path, request.method, request.headers, request.get_data(), request.cookies)
     return "404 - Not Found", 404
 
-# ==========================================
-# APPLICATION STARTUP & INITIALIZATION
-# ==========================================
 def init_logos():
     global LOCAL_COMPANY_LOGO, LOCAL_CUSTOMER_LOGO
-    
     logo_dir = '/app/data/logos'
     os.makedirs(logo_dir, exist_ok=True)
-    
     def process_logo(env_var, filename):
         val = os.environ.get(env_var, '').strip()
         if not val: return None
-        
         filepath = os.path.join(logo_dir, filename)
         serve_path = f"/local_logo/{filename}"
-        
         if val.startswith('http://') or val.startswith('https://'):
             try:
                 resp = requests.get(val, timeout=5)
                 if resp.status_code == 200:
-                    with open(filepath, 'wb') as f:
-                        f.write(resp.content)
+                    with open(filepath, 'wb') as f: f.write(resp.content)
                     return f"{serve_path}?t={int(time.time())}"
-            except Exception as e:
-                print(f"Notice: Could not fetch fresh {env_var}. Attempting offline fallback. ({e})")
-            
-            if os.path.exists(filepath):
-                return f"{serve_path}?t={int(os.path.getmtime(filepath))}"
-            
+            except Exception: pass
+            if os.path.exists(filepath): return f"{serve_path}?t={int(os.path.getmtime(filepath))}"
             return val
-            
         return val
 
     LOCAL_COMPANY_LOGO = process_logo('COMPANY_LOGO_URL', 'company_logo.png')
     LOCAL_CUSTOMER_LOGO = process_logo('CUSTOMER_LOGO_URL', 'customer_logo.png')
 
-# ==========================================
-# GUNICORN / FLASK BOOTLOADER
-# ==========================================
 try:
     init_db()
     init_logos()
-    
     os.makedirs('/app/data', exist_ok=True)
-        
-    # Spawn the completely isolated background workers
     socketio.start_background_task(monitor_loop)
     socketio.start_background_task(sync_db_loop)
     socketio.start_background_task(log_prune_loop)
-        
-except Exception as e:
-    print(f"Startup initialization error: {e}")
+except Exception as e: print(f"Startup initialization error: {e}")
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000)
