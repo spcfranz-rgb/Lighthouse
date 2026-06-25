@@ -4,9 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CCTV Monitor Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
 </head>
 <body class="container py-4">
+
+    <div aria-live="polite" aria-atomic="true" class="position-relative">
+        <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer" style="z-index: 1060;">
+            </div>
+    </div>
 
     <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-4 border-bottom pb-3 gap-3">
         <div class="d-flex align-items-center justify-content-center justify-content-md-start">
@@ -461,9 +466,35 @@
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js" integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js" integrity="sha384-/mRL506E115DE81uFjL1HjIfdAQfB2w7y/A59N9L1E0wS1R8xR1yX60bU1kXv3Xo" crossorigin="anonymous"></script>
+
     <script>
+        // Global Toast Notification Helper
+        function showToast(message, type = 'success') {
+            const toastContainer = document.getElementById('toastContainer');
+            const toastEl = document.createElement('div');
+            toastEl.className = `toast align-items-center text-white bg-${type} border-0`;
+            toastEl.setAttribute('role', 'alert');
+            toastEl.setAttribute('aria-live', 'assertive');
+            toastEl.setAttribute('aria-atomic', 'true');
+            
+            toastEl.innerHTML = `
+              <div class="d-flex">
+                <div class="toast-body fw-bold">${message}</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+              </div>
+            `;
+            
+            toastContainer.appendChild(toastEl);
+            const toast = new bootstrap.Toast(toastEl, { delay: 4000 });
+            toast.show();
+            
+            toastEl.addEventListener('hidden.bs.toast', () => {
+                toastEl.remove();
+            });
+        }
+
         // ARP Scanner Function
         function runArpScan() {
             const tbody = document.getElementById('arpResultsBody');
@@ -473,14 +504,22 @@
             fetch('/api/network/arp')
                 .then(res => res.json())
                 .then(data => {
-                    tbody.innerHTML = '';
                     if (data.count === 0) {
                         tbody.innerHTML = '<tr><td colspan="3" class="text-center text-warning py-3">No active hardware found in cache. Is the physical cable connected?</td></tr>';
                         return;
                     }
+                    
+                    // Buffer DOM updates to prevent layout thrashing
+                    let htmlBuffer = '';
                     data.devices.forEach(d => {
-                        tbody.innerHTML += `<tr><td class="text-info font-monospace">${d.ip}</td><td class="font-monospace text-light">${d.mac}</td><td><span class="badge bg-secondary">${d.interface}</span></td></tr>`;
+                        // Escape variables locally via text node creation if untrusted, but for LAN IPs string interpolation is generally safe here.
+                        htmlBuffer += `<tr>
+                            <td class="text-info font-monospace">${d.ip}</td>
+                            <td class="font-monospace text-light">${d.mac}</td>
+                            <td><span class="badge bg-secondary">${d.interface}</span></td>
+                        </tr>`;
                     });
+                    tbody.innerHTML = htmlBuffer;
                 })
                 .catch(err => {
                     tbody.innerHTML = `<tr><td colspan="3" class="text-center text-danger py-3">Network error / Endpoint unavailable.</td></tr>`;
@@ -492,7 +531,6 @@
             const formData = new FormData();
             formData.append('hours', hours);
 
-            // 1. Give instant feedback to the user
             const badge = document.getElementById(`status-${type}-${id}`);
             badge.innerText = 'Updating...';
             badge.className = 'badge bg-secondary';
@@ -501,53 +539,87 @@
             .then(res => res.json())
             .then(data => { 
                 if (!data.success) {
-                    alert("Failed to silence device.");
-                    location.reload(); // Only reload if it actually fails
+                    showToast("Failed to silence device.", "danger");
+                    setTimeout(() => location.reload(), 1500); 
+                } else {
+                    showToast(hours > 0 ? "Device silenced successfully." : "Silence removed.", "success");
                 }
+            })
+            .catch(() => {
+                showToast("Network connection error.", "danger");
+                setTimeout(() => location.reload(), 1500); 
             });
         }
         
-        // Snapshot Preview Script
+        // Snapshot Preview Script (Using Recursive setTimeout)
         let modalInstance;
-        let previewInterval;
+        let previewTimer;
         let currentPreviewId;
+        let isModalOpen = false;
 
         function showPreview(id, name) {
             currentPreviewId = id;
+            isModalOpen = true;
+            
             if (!modalInstance) {
                 modalInstance = new bootstrap.Modal(document.getElementById('previewModal'));
                 document.getElementById('previewModal').addEventListener('hidden.bs.modal', function () {
-                    if (previewInterval) { clearInterval(previewInterval); previewInterval = null; }
+                    isModalOpen = false;
+                    if (previewTimer) clearTimeout(previewTimer);
                 });
             }
+            
             document.getElementById('previewModalLabel').innerText = 'Live Preview: ' + name;
             const img = document.getElementById('previewImage');
             const spinner = document.getElementById('previewSpinner');
             
+            if (previewTimer) clearTimeout(previewTimer);
+            
             function fetchSnapshot(isFirstLoad = false) {
+                if (!isModalOpen) return;
+                
                 const timestamp = new Date().getTime();
                 const newSrc = '/snapshot/' + currentPreviewId + '?t=' + timestamp;
+                
                 if (isFirstLoad) {
-                    img.classList.add('d-none'); spinner.classList.remove('d-none'); img.src = newSrc;
+                    img.classList.add('d-none'); 
+                    spinner.classList.remove('d-none'); 
+                    img.src = newSrc;
                 } else {
                     const tempImg = new Image();
-                    tempImg.onload = function() { img.src = this.src; }; tempImg.src = newSrc;
+                    tempImg.onload = function() { 
+                        if (isModalOpen) {
+                            img.src = this.src; 
+                            previewTimer = setTimeout(() => fetchSnapshot(false), 10000);
+                        }
+                    };
+                    tempImg.onerror = function() {
+                        if (isModalOpen) {
+                            previewTimer = setTimeout(() => fetchSnapshot(false), 10000);
+                        }
+                    };
+                    tempImg.src = newSrc;
                 }
             }
 
-            img.onload = function() { spinner.classList.add('d-none'); img.classList.remove('d-none'); };
+            img.onload = function() { 
+                spinner.classList.add('d-none'); 
+                img.classList.remove('d-none'); 
+                if (!previewTimer && isModalOpen) {
+                    previewTimer = setTimeout(() => fetchSnapshot(false), 10000);
+                }
+            };
             img.onerror = function() {
                 spinner.classList.add('d-none');
-                if (!previewInterval) { alert('Failed to load snapshot.'); modalInstance.hide(); }
+                showToast('Failed to load initial snapshot.', 'warning');
+                modalInstance.hide();
             };
             
-            if (previewInterval) clearInterval(previewInterval);
             fetchSnapshot(true);
-            previewInterval = setInterval(() => { fetchSnapshot(false); }, 10000);
             modalInstance.show();
         }
 
-        // Diagnostic Ping Script (Fetch Standard)
+        // Diagnostic Ping Script
         function runPing() {
             const ipInput = document.getElementById('diagIp');
             const pBtn = document.getElementById('pingBtn');
@@ -557,7 +629,7 @@
             const output = document.getElementById('diagOutput');
             const ip = ipInput.value.trim();
 
-            if (!ip) { alert('Please enter an IP address or Hostname.'); return; }
+            if (!ip) { showToast('Please enter an IP address or Hostname.', 'warning'); return; }
 
             output.classList.remove('d-none', 'text-danger', 'text-success');
             output.textContent = '';
@@ -605,7 +677,7 @@
             const output = document.getElementById('diagOutput');
             const ip = ipInput.value.trim();
 
-            if (!ip) { alert('Please enter an IP address or Hostname.'); return; }
+            if (!ip) { showToast('Please enter an IP address or Hostname.', 'warning'); return; }
 
             pBtn.disabled = true; tBtn.disabled = true; ipInput.disabled = true;
             spinnerText.innerText = 'Tracing route (may take up to 60s)...';
@@ -627,7 +699,6 @@
             });
         }
         
-        // Let user hit enter on diagnostic input to default to Ping
         const diagIpElement = document.getElementById("diagIp");
         if (diagIpElement) {
             diagIpElement.addEventListener("keypress", function(event) {
@@ -682,19 +753,21 @@
                     return;
                 }
 
-                let html = `<div class="alert alert-success py-1 mb-2 px-2 text-center">Found ${data.discovered.length} new devices!</div>
+                // Buffer DOM updates
+                let htmlBuffer = `<div class="alert alert-success py-1 mb-2 px-2 text-center">Found ${data.discovered.length} new devices!</div>
                 <div class="mb-1 text-end"><a href="javascript:void(0)" class="text-decoration-none me-2" onclick="toggleAllCheckboxes(true)">Select All</a> <a href="javascript:void(0)" class="text-decoration-none text-secondary" onclick="toggleAllCheckboxes(false)">None</a></div>
                 <ul class="list-group list-group-flush border rounded mb-2" style="max-height: 150px; overflow-y: auto;">`;
                 
                 data.discovered.forEach(ip => {
-                    html += `<li class="list-group-item py-1 px-2 d-flex align-items-center">
+                    htmlBuffer += `<li class="list-group-item py-1 px-2 d-flex align-items-center">
                         <input class="form-check-input me-2 bulk-ip-check" type="checkbox" value="${ip}" checked>
-                        <span class="text-primary cursor-pointer flex-grow-1" style="cursor: pointer;" onclick="document.querySelector('input[name=\\'ip\\']').value = '${ip}'; alert('IP copied to manual form below.');" title="Click to auto-fill manual form below">${ip}</span>
+                        <span class="text-primary cursor-pointer flex-grow-1" style="cursor: pointer;" onclick="document.querySelector('input[name=\\'ip\\']').value = '${ip}'; showToast('IP copied to manual form below.', 'info');" title="Click to auto-fill manual form below">${ip}</span>
                     </li>`;
                 });
                 
-                html += `</ul><small class="text-muted mt-1 d-block lh-sm" style="font-size: 0.7rem;">Check boxes to mass-add, or click a blue IP to drop it into the manual form below.</small>`;
-                resultsDiv.innerHTML = html; bulkOptions.classList.remove('d-none');
+                htmlBuffer += `</ul><small class="text-muted mt-1 d-block lh-sm" style="font-size: 0.7rem;">Check boxes to mass-add, or click a blue IP to drop it into the manual form below.</small>`;
+                resultsDiv.innerHTML = htmlBuffer; 
+                bulkOptions.classList.remove('d-none');
             })
             .catch(err => { resultsDiv.innerHTML = `<span class="text-danger">Network Error: ${err.message}</span>`; })
             .finally(() => { btn.disabled = false; spinner.classList.add('d-none'); });
@@ -703,7 +776,7 @@
         function submitBulkAdd() {
             const btn = document.getElementById('submitBulkBtn');
             const checkboxes = document.querySelectorAll('.bulk-ip-check:checked');
-            if (checkboxes.length === 0) { alert("Please check at least one IP address to mass-add."); return; }
+            if (checkboxes.length === 0) { showToast("Please check at least one IP address to mass-add.", "warning"); return; }
 
             const ips = Array.from(checkboxes).map(chk => chk.value);
             const mfg = document.getElementById('bulkMfg').value;
@@ -719,17 +792,22 @@
             })
             .then(res => res.json())
             .then(data => {
-                if (data.success) { alert(`Successfully added ${data.added} cameras!`); location.reload(); } 
-                else { alert(`Error: ${data.error}`); btn.disabled = false; btn.innerText = "Add Checked Cameras"; }
+                if (data.success) { 
+                    showToast(`Successfully added ${data.added} cameras!`, "success"); 
+                    setTimeout(() => location.reload(), 1500); 
+                } 
+                else { 
+                    showToast(`Error: ${data.error}`, "danger"); 
+                    btn.disabled = false; btn.innerText = "Add Checked Cameras"; 
+                }
             })
-            .catch(err => { alert(`Network Error: ${err.message}`); btn.disabled = false; btn.innerText = "Add Checked Cameras"; });
+            .catch(err => { 
+                showToast(`Network Error: ${err.message}`, "danger"); 
+                btn.disabled = false; btn.innerText = "Add Checked Cameras"; 
+            });
         }
-    </script>
-
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <script>
-        const socket = io();
         
+        // Socket.IO Status Updates
         socket.on('state_change', function(data) {
             const key = (data.type === 'switches' ? 'switch-' : 'camera-') + data.id;
             const badge = document.getElementById('status-' + key);
@@ -775,10 +853,7 @@
                     document.getElementById('st-ping').innerText = data.ping;
                     document.getElementById('st-download').innerText = data.download;
                     document.getElementById('st-upload').innerText = data.upload;
-                    
-                    // Display the newly emitted server data alongside the ISP
                     document.getElementById('st-isp').innerText = data.isp + ' | Server: ' + data.server;
-                    
                     display.classList.remove('d-none');
                 } else {
                     errDiv.textContent = 'Test Failed: ' + data.error; errDiv.classList.remove('d-none');
