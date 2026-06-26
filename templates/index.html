@@ -332,13 +332,17 @@
                                     <input type="text" id="mqtt_broker" name="mqtt_broker" class="form-control border-secondary" value="{{ settings.mqtt_broker }}" required>
                                 </div>
                                 <div class="row mb-3">
-                                    <div class="col-6">
+                                    <div class="col-md-4">
                                         <label for="mqtt_port" class="form-label small text-muted fw-bold mb-1">MQTT Port</label>
                                         <input type="number" id="mqtt_port" name="mqtt_port" class="form-control border-secondary" value="{{ settings.mqtt_port }}" required>
                                     </div>
-                                    <div class="col-6">
-                                        <label for="check_interval" class="form-label small text-muted fw-bold mb-1">Check Interval (Sec)</label>
+                                    <div class="col-md-4">
+                                        <label for="check_interval" class="form-label small text-muted fw-bold mb-1">Check Interval (s)</label>
                                         <input type="number" id="check_interval" name="check_interval" class="form-control border-secondary" value="{{ settings.check_interval }}" required>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label for="idle_timeout" class="form-label small text-muted fw-bold mb-1">Idle Logout (m)</label>
+                                        <input type="number" id="idle_timeout" name="idle_timeout" class="form-control border-secondary" value="{{ settings.idle_timeout|default(20) }}" required>
                                     </div>
                                 </div>
                                 <div class="mb-4">
@@ -500,6 +504,27 @@
         const diagSpinnerText = document.getElementById('diagSpinnerText');
         const diagOutput = document.getElementById('diagOutput');
         
+        // --- JAVASCRIPT IDLE LOGOUT TIMER ---
+        // Dynamically injected timeout parameter from settings database (Defaults to 20 mins)
+        const IDLE_TIMEOUT_MS = {{ settings.idle_timeout|default(20) }} * 60 * 1000;
+        let frontendIdleTimer;
+        
+        function resetFrontendIdleTimer() {
+            clearTimeout(frontendIdleTimer);
+            frontendIdleTimer = setTimeout(() => {
+                // If user doesn't touch the mouse/keyboard, gently redirect them to /logout
+                window.location.href = '/logout';
+            }, IDLE_TIMEOUT_MS);
+        }
+        
+        // Monitor UI interactions to keep the session alive
+        ['mousemove', 'keydown', 'mousedown', 'touchstart', 'scroll'].forEach(evt => {
+            window.addEventListener(evt, resetFrontendIdleTimer, { passive: true });
+        });
+        
+        // Initialize timer on load
+        resetFrontendIdleTimer();
+
         // --- UI HELPERS ---
         function showToast(message, type = 'success') {
             const container = document.getElementById('toastContainer');
