@@ -6,10 +6,7 @@ services:
     ports:
       - "1883:1883"
     volumes:
-      # CONFIG: Relative mount (Pulled fresh from GitHub every deployment)
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
-      
-      # DATA: Absolute mounts (Survives repo wipes)
       - /opt/cctv-data/mosquitto/data:/mosquitto/data
       - /opt/cctv-data/mosquitto/log:/mosquitto/log
     logging:
@@ -35,11 +32,33 @@ services:
       - CUSTOMER_LOGO_URL=${CUSTOMER_LOGO_URL}
       - DEFAULT_MQTT_BROKER=127.0.0.1 
       - DEFAULT_MQTT_PORT=1883
+      
+      # SSO: Authentik
       - AUTHENTIK_URL=${AUTHENTIK_URL}
       - AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
       - AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}
+      
+      # SSO: Microsoft / Entra ID
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      
+      # SSO: Google Workspace
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      
+      # SSO: Okta
+      - OKTA_DOMAIN=${OKTA_DOMAIN}
+      - OKTA_CLIENT_ID=${OKTA_CLIENT_ID}
+      - OKTA_CLIENT_SECRET=${OKTA_CLIENT_SECRET}
+      
+      # SSO: Keycloak
+      - KEYCLOAK_URL=${KEYCLOAK_URL}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
+      
     volumes:
-      # DATA: Absolute mount for the Python backend database (Survives repo wipes)
       - /opt/cctv-data/dashboard:/app/data
     tmpfs:
       - /app/data_ram
