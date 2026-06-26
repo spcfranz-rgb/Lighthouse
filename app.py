@@ -16,6 +16,8 @@ import base64
 import re
 import atexit
 import signal
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 import eventlet.greenpool
 from eventlet.event import Event
@@ -32,7 +34,6 @@ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from urllib.parse import urlparse
 from functools import wraps
 
-# FIX: Added 'session' to the imports for idle timeout tracking
 from flask import Flask, render_template, request, redirect, url_for, abort, flash, Response, jsonify, send_from_directory, session
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -132,7 +133,6 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# NEW: Unified Audit Logging Function
 def log_audit(device_type, device_name, status):
     """Securely inserts user actions into the event log database."""
     try:
@@ -185,10 +185,8 @@ def trigger_monitor_check():
     if not force_check_event.ready():
         force_check_event.send(True)
 
-# NEW: Backend Idle Timeout Enforcement
 @app.before_request
 def manage_idle_timeout():
-    # Skip tracking for static assets and tunneled proxies to prevent false timeouts
     if request.endpoint in ['static', 'serve_local_logo'] or request.path.startswith('/tunnel/'):
         return 
         
@@ -261,12 +259,23 @@ def init_db():
             ('mqtt_port', os.environ.get('DEFAULT_MQTT_PORT', '1883')),
             ('mqtt_prefix', os.environ.get('DEFAULT_MQTT_PREFIX', 'zabbix/cctv')),
             ('check_interval', os.environ.get('DEFAULT_CHECK_INTERVAL', '60')),
-            ('idle_timeout', '20') # NEW
+            ('idle_timeout', '20'),
+            ('smtp_host', ''),     
+            ('smtp_port', '587'),  
+            ('smtp_user', ''),     
+            ('smtp_pass', ''),     
+            ('smtp_target', '')    
         ]
         cursor.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
     else:
-        # Gracefully inject the new config key into an existing database
         try: cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('idle_timeout', '20')")
+        except sqlite3.OperationalError: pass
+        try:
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_host', '')")
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_port', '587')")
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_user', '')")
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_pass', '')")
+            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_target', '')")
         except sqlite3.OperationalError: pass
         
     cursor.execute("SELECT count(*) FROM users")
@@ -434,6 +443,35 @@ def threaded_camera_check(cam):
                 
     return cam['id'], cam_up, stream_ok, snap_bytes, fetched_mac
 
+def send_failover_email(subject, body):
+    """Fires an email in a non-blocking background thread to prevent stalling camera checks."""
+    def _send():
+        conn = get_db()
+        settings = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
+        conn.close()
+        
+        if not settings.get('smtp_host') or not settings.get('smtp_target'):
+            return 
+            
+        try:
+            msg = EmailMessage()
+            msg.set_content(body)
+            msg['Subject'] = subject
+            msg['From'] = settings.get('smtp_user') or 'lighthouse@edge-gateway'
+            msg['To'] = settings['smtp_target']
+            
+            server = smtplib.SMTP(settings['smtp_host'], int(settings.get('smtp_port', 587)))
+            server.starttls()
+            if settings.get('smtp_user') and settings.get('smtp_pass'):
+                server.login(settings['smtp_user'], settings['smtp_pass'])
+            server.send_message(msg)
+            server.quit()
+            log_audit('System', 'Email Failover', f'Sent emergency email: {subject}')
+        except Exception as e:
+            log_audit('System', 'Email Failover', f'Failed to send email: {str(e)}')
+            
+    eventlet.spawn_n(_send)
+
 def monitor_loop():
     global force_check_event
     previous_hashes = {} 
@@ -447,10 +485,25 @@ def monitor_loop():
     interval = int(settings_dict.get('check_interval', 60))
     
     client = mqtt.Client("camera_monitor_service")
+    
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0: log_audit('System', 'MQTT Broker', 'UP (Connected)')
+        else: log_audit('System', 'MQTT Broker', f'ERR (Connection Refused: {rc})')
+
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            log_audit('System', 'MQTT Broker', 'DOWN (Unexpected Disconnect)')
+            send_failover_email("CRITICAL: Lighthouse MQTT Disconnected", "The edge gateway has lost its connection to the Zabbix MQTT broker. Camera failover alerts will now route via email.")
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+
     try:
         client.connect(broker, port, 60)
         client.loop_start()
-    except Exception: pass
+    except Exception as e: 
+        log_audit('System', 'MQTT Broker', f'DOWN (Initial Connection Failed)')
+        send_failover_email("CRITICAL: Lighthouse MQTT Offline", "The edge gateway failed to connect to the Zabbix broker on boot. Email failover engaged.")
         
     while True:
         try:
@@ -467,6 +520,10 @@ def monitor_loop():
                         'type': table, 'id': item_id, 'name': item_name,
                         'status': new_status, 'device_type': dev_type, 'timestamp': now
                     })
+                    
+                    if 'DOWN' in new_status or 'UNREACHABLE' in new_status or 'ERR' in new_status:
+                        if not client.is_connected():
+                            send_failover_email(f"FAILOVER ALERT: {item_name} is {new_status}", f"The {dev_type} '{item_name}' transitioned to a critical state ({new_status}).\n\nThis alert was routed via SMTP because the primary MQTT connection to Zabbix is currently offline.")
             
             cursor.execute("SELECT key, value FROM settings")
             dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
@@ -639,8 +696,6 @@ def serve_local_logo(filename):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    fallback = request.args.get('fallback') == 'true'
-    
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -656,24 +711,21 @@ def login():
             flash('Invalid local username or password', 'danger')
             return redirect(url_for('login', fallback='true'))
 
-    # Load the page instantly without blocking on a network health check
     fallback = request.args.get('fallback') == 'true'
     return render_template('login.html', fallback=fallback, sso_configured=bool(AUTHENTIK_URL))
 
 @app.route('/login/sso')
 def login_sso():
-    """Dedicated route to handle SSO redirects so the main login page doesn't lag."""
     if not AUTHENTIK_URL:
         return redirect(url_for('login'))
         
     try:
-        # The 1.5s delay will only happen here if Authentik is offline
         requests.get(f"{AUTHENTIK_URL.rstrip('/')}/-/health/ready/", timeout=1.5)
         return oauth.authentik.authorize_redirect(url_for('auth_callback', _external=True))
     except requests.RequestException:
         flash('Authentik SSO server is unreachable. Please use local access.', 'warning')
         return redirect(url_for('login', fallback='true'))
-        
+
 @app.route('/auth/callback')
 def auth_callback():
     try:
@@ -700,13 +752,13 @@ def auth_callback():
     conn.close()
     
     login_user(User(user_id, username, role))
-    log_audit('System', username, 'User Logged In (SSO)') # LOG EVENT
+    log_audit('System', username, 'User Logged In (SSO)')
     return redirect(url_for('index'))
 
 @app.route('/logout')
 @login_required
 def logout():
-    log_audit('System', current_user.username, 'User Logged Out') # LOG EVENT
+    log_audit('System', current_user.username, 'User Logged Out')
     logout_user()
     session.pop('last_active', None)
     return redirect(url_for('login'))
@@ -759,7 +811,7 @@ def export_logs():
         dt_string = datetime.utcfromtimestamp(log['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
         cw.writerow([dt_string, log['device_type'], log['device_name'], log['status']])
     
-    log_audit('User', current_user.username, 'Exported Event Logs CSV') # LOG EVENT
+    log_audit('User', current_user.username, 'Exported Event Logs CSV')
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=cctv_event_logs.csv"})
 
 @app.route('/export_config')
@@ -783,7 +835,7 @@ def export_config():
         cw.writerow(['Camera', parent, c['name'], c['ip'], c['stream_url'], c['manufacturer'], c['username'], decrypt_pwd(c['password'])])
         
     conn.close()
-    log_audit('User', current_user.username, 'Exported System Configuration CSV') # LOG EVENT
+    log_audit('User', current_user.username, 'Exported System Configuration CSV')
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=cctv_config.csv"})
 
 @app.route('/download_template')
@@ -857,7 +909,7 @@ def import_config():
         conn.commit()
         conn.close()
         trigger_monitor_check()
-        log_audit('User', current_user.username, 'Imported configuration via CSV') # LOG EVENT
+        log_audit('User', current_user.username, 'Imported configuration via CSV')
         flash('CSV Configuration imported successfully.', 'success')
     except Exception as e: flash(f'Error importing CSV: {str(e)}', 'danger')
     return redirect(url_for('index'))
@@ -866,7 +918,7 @@ def import_config():
 @login_required
 @operator_required
 def fetch_arp_table():
-    log_audit('User', current_user.username, 'Initiated native L2 ARP scan') # LOG EVENT
+    log_audit('User', current_user.username, 'Initiated native L2 ARP scan')
     try:
         devices = get_camlan_arp_table()
         return jsonify({"status": "success", "count": len(devices), "interface_scanned": "All Interfaces", "devices": devices}), 200
@@ -884,7 +936,7 @@ def scan_network():
     hosts = [str(ip) for ip in network.hosts()]
     if len(hosts) > 1024: return jsonify({'success': False, 'error': 'Subnet too large. Please scan a /22 or smaller.'})
 
-    log_audit('User', current_user.username, f'Initiated network subnet scan on {subnet}') # LOG EVENT
+    log_audit('User', current_user.username, f'Initiated network subnet scan on {subnet}')
 
     def check_rtsp_port(ip):
         try:
@@ -926,7 +978,7 @@ def add_cameras_bulk():
     conn.commit()
     conn.close()
     trigger_monitor_check()
-    log_audit('User', current_user.username, f'Bulk added {added_count} cameras') # LOG EVENT
+    log_audit('User', current_user.username, f'Bulk added {added_count} cameras')
     return jsonify({'success': True, 'added': added_count, 'errors': errors})
 
 @app.route('/toggle_silence/<device_type>/<int:id>', methods=['POST'])
@@ -951,7 +1003,7 @@ def toggle_silence(device_type, id):
     conn.close()
     
     action_text = f"Silenced {device_type} '{device_name}' for {hours}h" if hours > 0 else f"Removed silence from {device_type} '{device_name}'"
-    log_audit('User', current_user.username, action_text) # LOG EVENT
+    log_audit('User', current_user.username, action_text)
     trigger_monitor_check()
     
     return jsonify({'success': True})
@@ -973,16 +1025,13 @@ def manual_ping():
 @operator_required
 def run_traceroute():
     target = request.form.get('target')
-    sid = request.form.get('sid') # Capture the unique Socket ID from the frontend
-    
+    sid = request.form.get('sid')
     if not is_valid_target(target): return jsonify({'success': False, 'error': 'Security Error: Invalid target format.'})
 
     def execute_trace():
         try:
             cmd = ['traceroute', '-w', '2', '-m', '30', '-q', '1', target.strip()]
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            
-            # Add 'to=sid' to emit only back to the requester
             if process.returncode == 0: socketio.emit('traceroute_result', {'success': True, 'output': process.stdout}, to=sid)
             else: socketio.emit('traceroute_result', {'success': False, 'error': process.stderr.strip() or process.stdout.strip()}, to=sid)
         except subprocess.TimeoutExpired: socketio.emit('traceroute_result', {'success': False, 'error': 'Traceroute timed out.'}, to=sid)
@@ -995,15 +1044,24 @@ def run_traceroute():
 @login_required
 @operator_required
 def run_speedtest():
-    sid = request.form.get('sid') # Capture the unique Socket ID from the frontend
+    sid = request.form.get('sid')
     log_audit('User', current_user.username, 'Initiated WAN Speedtest')
     
     def execute_test():
         try:
             cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            
             if process.returncode == 0:
-                data = json.loads(process.stdout)
+                output_text = process.stdout
+                
+                # Safely parse JSON from the Speedtest CLI
+                json_start = output_text.find('{')
+                json_end = output_text.rfind('}') + 1
+                if json_start != -1 and json_end != 0:
+                    output_text = output_text[json_start:json_end]
+
+                data = json.loads(output_text)
                 download = round((data['download']['bandwidth'] * 8) / 1000000, 2)
                 upload = round((data['upload']['bandwidth'] * 8) / 1000000, 2)
                 ping = round(data['ping']['latency'], 1)
@@ -1020,17 +1078,23 @@ def run_speedtest():
                     conn.close()
                 except Exception as e: print(f"DB Error saving speedtest: {e}")
 
-                # Add 'to=sid' to emit only back to the requester
                 socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string, 'timestamp': now}, to=sid)
             else: 
                 err_msg = process.stderr.strip() or "Unknown execution error."
                 try:
-                    fallback = subprocess.run(['speedtest', '-L', '-f', 'json'], capture_output=True, text=True, timeout=10)
-                    servers = json.loads(fallback.stdout).get('servers', [])
+                    fallback = subprocess.run(['speedtest', '--accept-license', '--accept-gdpr', '-L', '-f', 'json'], capture_output=True, text=True, timeout=10)
+                    fallback_text = fallback.stdout
+                    f_start = fallback_text.find('{')
+                    f_end = fallback_text.rfind('}') + 1
+                    if f_start != -1 and f_end != 0:
+                        fallback_text = fallback_text[f_start:f_end]
+                        
+                    servers = json.loads(fallback_text).get('servers', [])
                     if servers: err_msg += " | Available Nearby Servers: " + ", ".join([f"{s['name']} ({s['location']})" for s in servers[:3]])
                 except Exception: pass
                 socketio.emit('speedtest_result', {'success': False, 'error': err_msg}, to=sid)
-        except Exception as e: socketio.emit('speedtest_result', {'success': False, 'error': str(e)}, to=sid)
+        except Exception as e: 
+            socketio.emit('speedtest_result', {'success': False, 'error': str(e)}, to=sid)
 
     threading.Thread(target=execute_test).start()
     return jsonify({'status': 'running'})
@@ -1045,9 +1109,19 @@ def update_settings():
     conn.execute("UPDATE settings SET value = ? WHERE key = 'mqtt_prefix'", (request.form['mqtt_prefix'],))
     conn.execute("UPDATE settings SET value = ? WHERE key = 'check_interval'", (request.form['check_interval'],))
     conn.execute("UPDATE settings SET value = ? WHERE key = 'idle_timeout'", (request.form.get('idle_timeout', 20),))
+    
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'smtp_host'", (request.form.get('smtp_host', ''),))
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'smtp_port'", (request.form.get('smtp_port', '587'),))
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'smtp_user'", (request.form.get('smtp_user', ''),))
+    
+    new_pass = request.form.get('smtp_pass', '')
+    if new_pass: conn.execute("UPDATE settings SET value = ? WHERE key = 'smtp_pass'", (new_pass,))
+    
+    conn.execute("UPDATE settings SET value = ? WHERE key = 'smtp_target'", (request.form.get('smtp_target', ''),))
+    
     conn.commit()
     conn.close()
-    log_audit('User', current_user.username, 'Updated Global Gateway Settings') # LOG EVENT
+    log_audit('User', current_user.username, 'Updated Global Gateway Settings (MQTT/SMTP)') 
     trigger_monitor_check()
     flash('Settings updated.', 'success')
     return redirect(url_for('index'))
@@ -1064,7 +1138,7 @@ def test_alert():
         client.connect(settings_dict.get('mqtt_broker', '127.0.0.1'), int(settings_dict.get('mqtt_port', 1883)), 5)
         client.publish(f"{settings_dict.get('mqtt_prefix', 'zabbix/cctv')}/test_device/ping", "TEST_PING", retain=False)
         client.disconnect()
-        log_audit('User', current_user.username, 'Triggered test MQTT alert') # LOG EVENT
+        log_audit('User', current_user.username, 'Triggered test MQTT alert')
         flash(f'Test alert sent.', 'success')
     except Exception as e: flash(f'MQTT Error: {str(e)}', 'danger')
     return redirect(url_for('index'))
@@ -1078,7 +1152,7 @@ def add_switch():
     try:
         conn.execute("INSERT INTO switches (name, ip) VALUES (?, ?)", (name, request.form['ip']))
         conn.commit()
-        log_audit('User', current_user.username, f'Added new switch: {name}') # LOG EVENT
+        log_audit('User', current_user.username, f'Added new switch: {name}')
         trigger_monitor_check()
         flash('Switch added.', 'success')
     except sqlite3.IntegrityError: flash('Switch name already exists.', 'danger')
@@ -1095,7 +1169,7 @@ def edit_switch(id):
         try:
             conn.execute("UPDATE switches SET name = ?, ip = ? WHERE id = ?", (name, request.form['ip'], id))
             conn.commit()
-            log_audit('User', current_user.username, f'Edited switch config: {name}') # LOG EVENT
+            log_audit('User', current_user.username, f'Edited switch config: {name}')
             trigger_monitor_check()
             flash('Switch updated.', 'success')
             conn.close()
@@ -1116,7 +1190,7 @@ def delete_switch(id):
     conn.execute("DELETE FROM switches WHERE id = ?", (id,))
     conn.commit()
     conn.close()
-    log_audit('User', current_user.username, f'Deleted switch: {name}') # LOG EVENT
+    log_audit('User', current_user.username, f'Deleted switch: {name}')
     trigger_monitor_check()
     flash('Switch deleted.', 'success')
     return redirect(url_for('index'))
@@ -1132,7 +1206,7 @@ def add_camera():
         conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", 
                      (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', ''))))
         conn.commit()
-        log_audit('User', current_user.username, f'Added new camera: {name}') # LOG EVENT
+        log_audit('User', current_user.username, f'Added new camera: {name}')
         trigger_monitor_check()
         flash('Camera added.', 'success')
     except sqlite3.IntegrityError: flash('Camera name already exists.', 'danger')
@@ -1151,7 +1225,7 @@ def edit_camera(id):
             conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
                          (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', '')), id))
             conn.commit()
-            log_audit('User', current_user.username, f'Edited camera config: {name}') # LOG EVENT
+            log_audit('User', current_user.username, f'Edited camera config: {name}')
             trigger_monitor_check()
             flash('Camera updated.', 'success')
             conn.close()
@@ -1176,7 +1250,7 @@ def delete_camera(id):
     conn.execute("DELETE FROM cameras WHERE id = ?", (id,))
     conn.commit()
     conn.close()
-    log_audit('User', current_user.username, f'Deleted camera: {name}') # LOG EVENT
+    log_audit('User', current_user.username, f'Deleted camera: {name}')
     trigger_monitor_check()
     flash('Camera deleted.', 'success')
     return redirect(url_for('index'))
@@ -1192,7 +1266,7 @@ def add_user():
     try:
         conn.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, password, role))
         conn.commit()
-        log_audit('User', current_user.username, f'Provisioned new account for: {username}') # LOG EVENT
+        log_audit('User', current_user.username, f'Provisioned new account for: {username}')
         flash('User added.', 'success')
     except sqlite3.IntegrityError: flash('Username already exists.', 'danger')
     conn.close()
@@ -1211,7 +1285,7 @@ def delete_user(id):
     conn.execute("DELETE FROM users WHERE id = ?", (id,))
     conn.commit()
     conn.close()
-    log_audit('User', current_user.username, f'Deleted account: {uname}') # LOG EVENT
+    log_audit('User', current_user.username, f'Deleted account: {uname}')
     flash('User deleted.', 'success')
     return redirect(url_for('index'))
 
@@ -1269,7 +1343,6 @@ def tunnel(device_type, device_id, req_path):
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         resp_headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
         
-        # 3. HTTP Header Rewrite
         for i, (name, value) in enumerate(resp_headers):
             if name.lower() == 'location':
                 parsed = urlparse(value)
