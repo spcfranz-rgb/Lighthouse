@@ -971,16 +971,20 @@ def manual_ping():
 @operator_required
 def run_traceroute():
     target = request.form.get('target')
+    sid = request.form.get('sid') # Capture the unique Socket ID from the frontend
+    
     if not is_valid_target(target): return jsonify({'success': False, 'error': 'Security Error: Invalid target format.'})
 
     def execute_trace():
         try:
             cmd = ['traceroute', '-w', '2', '-m', '30', '-q', '1', target.strip()]
             process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
-            if process.returncode == 0: socketio.emit('traceroute_result', {'success': True, 'output': process.stdout})
-            else: socketio.emit('traceroute_result', {'success': False, 'error': process.stderr.strip() or process.stdout.strip()})
-        except subprocess.TimeoutExpired: socketio.emit('traceroute_result', {'success': False, 'error': 'Traceroute timed out.'})
-        except Exception as e: socketio.emit('traceroute_result', {'success': False, 'error': str(e)})
+            
+            # Add 'to=sid' to emit only back to the requester
+            if process.returncode == 0: socketio.emit('traceroute_result', {'success': True, 'output': process.stdout}, to=sid)
+            else: socketio.emit('traceroute_result', {'success': False, 'error': process.stderr.strip() or process.stdout.strip()}, to=sid)
+        except subprocess.TimeoutExpired: socketio.emit('traceroute_result', {'success': False, 'error': 'Traceroute timed out.'}, to=sid)
+        except Exception as e: socketio.emit('traceroute_result', {'success': False, 'error': str(e)}, to=sid)
 
     threading.Thread(target=execute_trace).start()
     return jsonify({'status': 'running'})
@@ -989,7 +993,9 @@ def run_traceroute():
 @login_required
 @operator_required
 def run_speedtest():
-    log_audit('User', current_user.username, 'Initiated WAN Speedtest') # LOG EVENT
+    sid = request.form.get('sid') # Capture the unique Socket ID from the frontend
+    log_audit('User', current_user.username, 'Initiated WAN Speedtest')
+    
     def execute_test():
         try:
             cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
@@ -1012,7 +1018,8 @@ def run_speedtest():
                     conn.close()
                 except Exception as e: print(f"DB Error saving speedtest: {e}")
 
-                socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string, 'timestamp': now})
+                # Add 'to=sid' to emit only back to the requester
+                socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string, 'timestamp': now}, to=sid)
             else: 
                 err_msg = process.stderr.strip() or "Unknown execution error."
                 try:
@@ -1020,8 +1027,8 @@ def run_speedtest():
                     servers = json.loads(fallback.stdout).get('servers', [])
                     if servers: err_msg += " | Available Nearby Servers: " + ", ".join([f"{s['name']} ({s['location']})" for s in servers[:3]])
                 except Exception: pass
-                socketio.emit('speedtest_result', {'success': False, 'error': err_msg})
-        except Exception as e: socketio.emit('speedtest_result', {'success': False, 'error': str(e)})
+                socketio.emit('speedtest_result', {'success': False, 'error': err_msg}, to=sid)
+        except Exception as e: socketio.emit('speedtest_result', {'success': False, 'error': str(e)}, to=sid)
 
     threading.Thread(target=execute_test).start()
     return jsonify({'status': 'running'})
