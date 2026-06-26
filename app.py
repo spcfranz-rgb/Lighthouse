@@ -891,7 +891,15 @@ def login_sso(provider):
         flash(f'{provider.capitalize()} SSO is not configured on this gateway.', 'warning')
         return redirect(url_for('login', fallback='true'))
         
-    return client.authorize_redirect(url_for('auth_callback', provider=provider, _external=True))
+    try:
+        # Authlib fetches the OIDC discovery document here. 
+        # If the SSO server is offline/unreachable, it throws an exception.
+        return client.authorize_redirect(url_for('auth_callback', provider=provider, _external=True))
+    except Exception as e:
+        print(f"SSO Route Error ({provider}): {str(e)}")
+        log_audit('System', 'SSO Failover', f'{provider.capitalize()} SSO Server Unreachable')
+        flash(f'The {provider.capitalize()} SSO server is currently unreachable. Please use local emergency access.', 'danger')
+        return redirect(url_for('login', fallback='true'))
 
 @app.route('/auth/callback/<provider>')
 def auth_callback(provider):
