@@ -62,10 +62,10 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').l
 def apply_csp(response):
     csp = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.socket.io; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://cdn.socket.io; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src 'self' data: blob: http: https:; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self' ws: wss: data: https://cdn.jsdelivr.net https://cdn.socket.io; "
         "object-src 'self' ws: wss:;"
     )
     response.headers['Content-Security-Policy'] = csp
