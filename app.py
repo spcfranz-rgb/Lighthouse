@@ -54,6 +54,11 @@ if not app.secret_key:
     print("WARNING: SECRET_KEY environment variable is missing. Using insecure development key.")
     app.secret_key = 'cctv-super-secret-key-change-me'
 
+db_key_env = os.environ.get('DB_ENCRYPTION_KEY')
+if not db_key_env:
+    print("WARNING: DB_ENCRYPTION_KEY missing. Falling back to SECRET_KEY for DB encryption (Not recommended).")
+    db_key_env = app.secret_key
+
 csrf = CSRFProtect(app)
 app.config['SESSION_COOKIE_HTTPONLY'] = True 
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -87,7 +92,7 @@ def inject_globals():
     }
 
 def get_cipher():
-    key_bytes = app.secret_key.encode('utf-8')
+    key_bytes = db_key_env.encode('utf-8')
     fernet_key = base64.urlsafe_b64encode(hashlib.sha256(key_bytes).digest())
     return Fernet(fernet_key)
 
@@ -427,8 +432,15 @@ def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
                 
     try:
         cmd = ['ffmpeg', '-y', '-rtsp_transport', 'tcp', '-i', stream_url, '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-']
-        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-        if process.returncode == 0: return process.stdout
+        # Enforce strict kill to prevent zombie processes lingering on timeout
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            try:
+                stdout, _ = proc.communicate(timeout=5)
+                if proc.returncode == 0: 
+                    return stdout
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate() # Flush buffers safely
     except Exception: pass
     return None
 
@@ -454,33 +466,33 @@ def threaded_camera_check(cam):
     return cam['id'], cam_up, stream_ok, snap_bytes, fetched_mac
 
 def send_failover_email(subject, body):
-    """Fires an email in a non-blocking background thread to prevent stalling camera checks."""
-    def _send():
-        conn = get_db()
-        settings = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
-        conn.close()
+    """Fires an email in a non-blocking background thread. Prefetches config to prevent stalling."""
+    conn = get_db()
+    settings = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
+    conn.close()
+    
+    if not settings.get('smtp_host') or not settings.get('smtp_target'):
+        return 
         
-        if not settings.get('smtp_host') or not settings.get('smtp_target'):
-            return 
-            
+    def _send(stgs):
         try:
             msg = EmailMessage()
             msg.set_content(body)
             msg['Subject'] = subject
-            msg['From'] = settings.get('smtp_user') or 'lighthouse@edge-gateway'
-            msg['To'] = settings['smtp_target']
+            msg['From'] = stgs.get('smtp_user') or 'lighthouse@edge-gateway'
+            msg['To'] = stgs['smtp_target']
             
-            server = smtplib.SMTP(settings['smtp_host'], int(settings.get('smtp_port', 587)))
+            server = smtplib.SMTP(stgs['smtp_host'], int(stgs.get('smtp_port', 587)))
             server.starttls()
-            if settings.get('smtp_user') and settings.get('smtp_pass'):
-                server.login(settings['smtp_user'], settings['smtp_pass'])
+            if stgs.get('smtp_user') and stgs.get('smtp_pass'):
+                server.login(stgs['smtp_user'], stgs['smtp_pass'])
             server.send_message(msg)
             server.quit()
             log_audit('System', 'Email Failover', f'Sent email: {subject}')
         except Exception as e:
             log_audit('System', 'Email Failover', f'Failed to send email: {str(e)}')
             
-    eventlet.spawn_n(_send)
+    eventlet.spawn_n(_send, settings)
 
 def automated_speedtest_loop():
     """Background worker that executes automated speed tests and evaluates thresholds."""
@@ -558,7 +570,6 @@ def monitor_loop():
     broker = settings_dict.get('mqtt_broker', '127.0.0.1')
     port = int(settings_dict.get('mqtt_port', 1883))
     prefix = settings_dict.get('mqtt_prefix', 'zabbix/cctv')
-    interval = int(settings_dict.get('check_interval', 60))
     
     client = mqtt.Client("camera_monitor_service")
     
@@ -583,15 +594,27 @@ def monitor_loop():
         
     while True:
         try:
+            # Phase 1: Retrieve configuration instantly.
             conn = get_db()
             cursor = conn.cursor()
-            now = time.time()
+            cursor.execute("SELECT key, value FROM settings")
+            dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
+            interval = int(dynamic_settings.get('check_interval', 60))
             
-            def set_status(table, item_id, item_name, dev_type, old_status, new_status):
+            cursor.execute("SELECT * FROM switches")
+            switches = [dict(row) for row in cursor.fetchall()]
+            
+            cursor.execute("SELECT * FROM cameras")
+            all_cameras = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            
+            now = time.time()
+            pending_db_updates = []
+            pending_mac_updates = []
+
+            def queue_status(table, item_id, item_name, dev_type, old_status, new_status):
                 if old_status != new_status:
-                    if old_status != 'UNKNOWN':
-                        cursor.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)", (now, dev_type, item_name, new_status))
-                    cursor.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (new_status, item_id))
+                    pending_db_updates.append((now, dev_type, item_name, new_status, table, item_id))
                     socketio.emit('state_change', {
                         'type': table, 'id': item_id, 'name': item_name,
                         'status': new_status, 'device_type': dev_type, 'timestamp': now
@@ -600,14 +623,14 @@ def monitor_loop():
                     if 'DOWN' in new_status or 'UNREACHABLE' in new_status or 'ERR' in new_status:
                         if not client.is_connected():
                             send_failover_email(f"FAILOVER ALERT: {item_name} is {new_status}", f"The {dev_type} '{item_name}' transitioned to a critical state ({new_status}).\n\nThis alert was routed via SMTP because the primary MQTT connection to Zabbix is currently offline.")
-            
-            cursor.execute("SELECT key, value FROM settings")
-            dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
-            interval = int(dynamic_settings.get('check_interval', 60))
-            
-            # --- SWITCHES ---
-            cursor.execute("SELECT * FROM switches")
-            switches = cursor.fetchall()
+
+            cameras_by_switch = {}
+            standalone_cameras = []
+            for c in all_cameras:
+                if c['switch_id']: cameras_by_switch.setdefault(c['switch_id'], []).append(c)
+                else: standalone_cameras.append(c)
+
+            # Phase 2: Execute Non-Blocking Network Operations
             for switch in switches:
                 switch_id, switch_name, switch_ip = switch['id'], switch['name'], switch['ip']
                 s_until, mac = switch['silenced_until'] or 0, switch['mac_address'] or ''
@@ -620,26 +643,21 @@ def monitor_loop():
                 if is_up:
                     if not mac:
                         fetched_mac = get_mac_address(switch_ip)
-                        if fetched_mac: conn.execute("UPDATE switches SET mac_address = ? WHERE id = ?", (fetched_mac.upper(), switch_id))
+                        if fetched_mac: pending_mac_updates.append(('switches', fetched_mac.upper(), switch_id))
                             
                     new_s_stat = 'UP' if not silenced else 'UP (Silenced)'
-                    set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
+                    queue_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
                     
-                    cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
-                    cameras = cursor.fetchall()
-                    camera_list = []
-                    for c in cameras:
-                        cd = dict(c)
-                        cd['password'] = decrypt_pwd(cd['password'])
-                        camera_list.append(cd)
-                        
+                    camera_list = cameras_by_switch.get(switch_id, [])
+                    camera_dicts_for_pool = [dict(c, password=decrypt_pwd(c['password'])) for c in camera_list]
                     camera_results = {}
-                    pool = eventlet.greenpool.GreenPool(size=20)
-                    for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in pool.imap(threaded_camera_check, camera_list):
-                        camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
-                        if fetched_mac: conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
                     
-                    for cam in cameras:
+                    pool = eventlet.greenpool.GreenPool(size=20)
+                    for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in pool.imap(threaded_camera_check, camera_dicts_for_pool):
+                        camera_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                        if fetched_mac: pending_mac_updates.append(('cameras', fetched_mac.upper(), c_id))
+                    
+                    for cam in camera_list:
                         c_until = cam['silenced_until'] or 0
                         cam_silenced = (c_until > now) or silenced
                         cam_id, cam_name = cam['id'], cam['name']
@@ -661,30 +679,29 @@ def monitor_loop():
                             if cam_silenced:
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                                if is_frozen: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
-                                else: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
+                                if is_frozen: queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
+                                else: queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                             else:
                                 client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                                 if is_frozen:
                                     client.publish(f"{prefix}/{cam_name}/stream", "FROZEN", retain=True)
-                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
+                                    queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
                                 else:
                                     client.publish(f"{prefix}/{cam_name}/stream", "UP" if stream_ok else "STREAM_ERROR", retain=True)
-                                    set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
+                                    queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
                         else:
                             if cam_silenced:
                                 client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                                set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
+                                queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
                             else:
                                 client.publish(f"{prefix}/{cam_name}/ping", "OFFLINE", retain=True)
                                 client.publish(f"{prefix}/{cam_name}/stream", "OFFLINE", retain=True)
-                                set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
+                                queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
                 else:
                     new_s_stat = 'DOWN' if not silenced else 'DOWN (Silenced)'
-                    set_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
-                    cursor.execute("SELECT * FROM cameras WHERE switch_id = ?", (switch_id,))
-                    for cam in cursor.fetchall():
+                    queue_status('switches', switch_id, switch_name, 'Switch', switch['status'], new_s_stat)
+                    for cam in cameras_by_switch.get(switch_id, []):
                         c_until = cam['silenced_until'] or 0
                         cam_silenced = (c_until > now) or silenced
                         if cam_silenced:
@@ -695,22 +712,16 @@ def monitor_loop():
                             client.publish(f"{prefix}/{cam['name']}/ping", "OFFLINE", retain=True)
                             client.publish(f"{prefix}/{cam['name']}/stream", "OFFLINE", retain=True)
                             new_c_stat = 'UNREACHABLE (Switch Down)'
-                        set_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
+                        queue_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
             # --- STANDALONE CAMERAS ---
-            cursor.execute("SELECT * FROM cameras WHERE switch_id IS NULL OR switch_id = ''")
-            standalone_cameras = cursor.fetchall()
-            standalone_list = []
-            for c in standalone_cameras:
-                cd = dict(c)
-                cd['password'] = decrypt_pwd(cd['password'])
-                standalone_list.append(cd)
-                
+            standalone_dicts_for_pool = [dict(c, password=decrypt_pwd(c['password'])) for c in standalone_cameras]
             standalone_results = {}
             standalone_pool = eventlet.greenpool.GreenPool(size=20)
-            for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in standalone_pool.imap(threaded_camera_check, standalone_list):
+            
+            for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in standalone_pool.imap(threaded_camera_check, standalone_dicts_for_pool):
                 standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
-                if fetched_mac: conn.execute("UPDATE cameras SET mac_address = ? WHERE id = ?", (fetched_mac, c_id))
+                if fetched_mac: pending_mac_updates.append(('cameras', fetched_mac.upper(), c_id))
                     
             for cam in standalone_cameras:
                 c_until = cam['silenced_until'] or 0
@@ -733,29 +744,42 @@ def monitor_loop():
                     if cam_silenced:
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                        if is_frozen: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
-                        else: set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
+                        if is_frozen: queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'FROZEN (Silenced)')
+                        else: queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP (Silenced)' if stream_ok else 'STREAM ERR (Silenced)')
                     else:
                         client.publish(f"{prefix}/{cam_name}/ping", "UP", retain=True)
                         if is_frozen:
                             client.publish(f"{prefix}/{cam_name}/stream", "FROZEN", retain=True)
-                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
+                            queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Frozen)')
                         else:
                             client.publish(f"{prefix}/{cam_name}/stream", "UP" if stream_ok else "STREAM_ERROR", retain=True)
-                            set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
+                            queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'UP' if stream_ok else 'DOWN (Stream Error)')
                 else:
                     if cam_silenced:
                         client.publish(f"{prefix}/{cam_name}/ping", "MAINTENANCE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "MAINTENANCE", retain=True)
-                        set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
+                        queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Silenced)')
                     else:
                         client.publish(f"{prefix}/{cam_name}/ping", "OFFLINE", retain=True)
                         client.publish(f"{prefix}/{cam_name}/stream", "OFFLINE", retain=True)
-                        set_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
+                        queue_status('cameras', cam_id, cam_name, 'Camera', cam['status'], 'DOWN (Offline)')
 
-            conn.commit()
-            conn.close()
-        except Exception: time.sleep(10)
+            # Phase 3: Execute High-Speed Batch Commit
+            if pending_db_updates or pending_mac_updates:
+                conn = get_db()
+                with conn:
+                    for (t_stamp, dev_type, item_name, new_status, table, item_id) in pending_db_updates:
+                        if new_status != 'UNKNOWN':
+                            conn.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)", (t_stamp, dev_type, item_name, new_status))
+                        conn.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (new_status, item_id))
+                    
+                    for table, mac, item_id in pending_mac_updates:
+                        conn.execute(f"UPDATE {table} SET mac_address = ? WHERE id = ?", (mac, item_id))
+                conn.close()
+
+        except Exception as e: 
+            print(f"Monitor loop iteration failed: {e}")
+            time.sleep(10)
             
         try:
             with eventlet.Timeout(interval): force_check_event.wait()
@@ -996,6 +1020,13 @@ def import_config():
 def fetch_arp_table():
     log_audit('User', current_user.username, 'Initiated native L2 ARP scan')
     try:
+        # Pre-populate kernel ARP cache with a quick non-blocking subnet broadcast ping
+        subnet = get_local_subnet()
+        try:
+            bcast = str(ipaddress.IPv4Network(subnet, strict=False).broadcast_address)
+            subprocess.run(['ping', '-c', '2', '-W', '1', '-b', bcast], timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception: pass
+        
         devices = get_camlan_arp_table()
         return jsonify({"status": "success", "count": len(devices), "interface_scanned": "All Interfaces", "devices": devices}), 200
     except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
@@ -1422,7 +1453,8 @@ def tunnel(device_type, device_id, req_path):
     full_req_path = f"{req_path}?{query_string}" if query_string else req_path
     
     clean_headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'origin', 'referer', 'accept-encoding']}
-    clean_headers['Host'] = device['ip']
+    # Force the strict host header resolution
+    clean_headers['Host'] = resolved_ip 
     target_url = f"http://{resolved_ip}/{full_req_path.lstrip('/')}"
     
     try:
@@ -1502,7 +1534,7 @@ try:
     init_logos()
     os.makedirs('/app/data', exist_ok=True)
     socketio.start_background_task(monitor_loop)
-    socketio.start_background_task(automated_speedtest_loop) # NEW BACKGROUND LOOP
+    socketio.start_background_task(automated_speedtest_loop)
     socketio.start_background_task(sync_db_loop)
     socketio.start_background_task(log_prune_loop)
 except Exception as e: print(f"Startup initialization error: {e}")
