@@ -639,7 +639,6 @@ def serve_local_logo(filename):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    fallback = request.args.get('fallback') == 'true'
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -649,22 +648,30 @@ def login():
         
         if user and check_password_hash(user['password'], password):
             login_user(User(user['id'], user['username'], user['role']))
-            log_audit('System', username, 'User Logged In (Local)') # LOG EVENT
+            log_audit('System', username, 'User Logged In (Local)')
             return redirect(url_for('index'))
         else:
             flash('Invalid local username or password', 'danger')
-            return render_template('login.html', fallback=True, sso_configured=bool(AUTHENTIK_URL))
+            return redirect(url_for('login', fallback='true'))
 
-    if AUTHENTIK_URL and not fallback:
-        try:
-            requests.get(f"{AUTHENTIK_URL.rstrip('/')}/-/health/ready/", timeout=1.5)
-            return oauth.authentik.authorize_redirect(url_for('auth_callback', _external=True))
-        except requests.RequestException:
-            flash('Authentik SSO server is unreachable. Emergency Local Access enabled.', 'warning')
-            fallback = True
-
+    # Load the page instantly without blocking on a network health check
+    fallback = request.args.get('fallback') == 'true'
     return render_template('login.html', fallback=fallback, sso_configured=bool(AUTHENTIK_URL))
 
+@app.route('/login/sso')
+def login_sso():
+    """Dedicated route to handle SSO redirects so the main login page doesn't lag."""
+    if not AUTHENTIK_URL:
+        return redirect(url_for('login'))
+        
+    try:
+        # The 1.5s delay will only happen here if Authentik is offline
+        requests.get(f"{AUTHENTIK_URL.rstrip('/')}/-/health/ready/", timeout=1.5)
+        return oauth.authentik.authorize_redirect(url_for('auth_callback', _external=True))
+    except requests.RequestException:
+        flash('Authentik SSO server is unreachable. Please use local access.', 'warning')
+        return redirect(url_for('login', fallback='true'))
+        
 @app.route('/auth/callback')
 def auth_callback():
     try:
