@@ -911,9 +911,9 @@ def webrtc_whep(cam_id):
         if not sdp_offer:
             return "Missing SDP offer", 400
 
-        # Pass the SDP offer to MediaMTX
+        # ARCHITECT FIX: Updated port from 8889 to 8189 to match mediamtx.yml
         resp = requests.post(
-            f"http://127.0.0.1:8889/cam_{cam_id}/whep", 
+            f"http://127.0.0.1:8189/cam_{cam_id}/whep", 
             data=sdp_offer,
             headers={"Content-Type": "application/sdp"},
             timeout=5
