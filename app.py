@@ -1,4 +1,6 @@
 # CRITICAL: Monkey patching must occur before ANY other imports
+import struct
+import select
 import eventlet
 eventlet.monkey_patch()
 import eventlet.tpool
@@ -410,10 +412,87 @@ def is_valid_target(target):
     if re.match(r'^[A-Za-z0-9_.-]+$', target): return True
     return False
 
-# ARCHITECT FIX: Offload synchronous blocking subprocess to the C-thread pool
-def is_pingable(target):
-    response = eventlet.tpool.execute(subprocess.call, ['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return response == 0
+def _icmp_checksum(source_string):
+    """Calculates the 16-bit one's complement of the one's complement sum (RFC 1071)."""
+    sum = 0
+    count_to = (len(source_string) // 2) * 2
+    count = 0
+    while count < count_to:
+        this_val = source_string[count + 1] * 256 + source_string[count]
+        sum = sum + this_val
+        sum = sum & 0xffffffff
+        count = count + 2
+    if count_to < len(source_string):
+        sum = sum + source_string[len(source_string) - 1]
+        sum = sum & 0xffffffff
+    sum = (sum >> 16) + (sum & 0xffff)
+    sum = sum + (sum >> 16)
+    answer = ~sum
+    answer = answer & 0xffff
+    answer = answer >> 8 | (answer << 8 & 0xff00)
+    return answer
+
+def is_pingable(target, timeout=1.5):
+    """
+    Native ICMP raw-socket implementation.
+    Yields to the Eventlet loop while awaiting the network layer.
+    """
+    try:
+        dest_addr = socket.gethostbyname(target)
+    except socket.gaierror:
+        return False
+
+    icmp = socket.getprotobyname("icmp")
+    
+    try:
+        # Require CAP_NET_RAW. If missing, failover to subprocess.
+        my_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, icmp)
+    except PermissionError:
+        response = eventlet.tpool.execute(subprocess.call, ['ping', '-c', '1', '-W', str(int(timeout)), target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return response == 0
+
+    try:
+        # Generate unique packet ID using PID + thread context to prevent reply collisions
+        my_ID = (os.getpid() ^ threading.get_ident()) & 0xFFFF
+        
+        # Craft ICMP Header (Type 8 = Echo Request, Code 0)
+        header = struct.pack("bbHHh", 8, 0, 0, my_ID, 1)
+        data = struct.pack("d", time.time()) 
+        
+        # Calculate checksum and repack
+        my_checksum = _icmp_checksum(header + data)
+        header = struct.pack("bbHHh", 8, 0, socket.htons(my_checksum), my_ID, 1)
+        
+        my_socket.sendto(header + data, (dest_addr, 1))
+        
+        time_left = timeout
+        while True:
+            started_select = time.time()
+            # Select is monkey-patched by Eventlet, making this non-blocking
+            what_ready = select.select([my_socket], [], [], time_left)
+            how_long_in_select = (time.time() - started_select)
+            
+            if what_ready[0] == []:  # Timeout reached
+                return False
+                
+            rec_packet, addr = my_socket.recvfrom(1024)
+            
+            # The IP header is the first 20 bytes; extract the ICMP header right after
+            icmp_header = rec_packet[20:28]
+            icmp_type, code, checksum, packet_ID, sequence = struct.unpack("bbHHh", icmp_header)
+            
+            # Type 0 is Echo Reply. Verify this reply belongs to our specific request ID.
+            if icmp_type == 0 and packet_ID == my_ID:
+                return True
+                
+            time_left = time_left - how_long_in_select
+            if time_left <= 0:
+                return False
+    except Exception as e:
+        print(f"ICMP Socket Error for {target}: {e}")
+        return False
+    finally:
+        my_socket.close()
 
 def is_port_open(target, port, timeout=2):
     try:
