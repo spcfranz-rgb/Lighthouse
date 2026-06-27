@@ -1261,6 +1261,10 @@ def add_cameras_bulk():
 
     conn.commit()
     conn.close()
+    
+    # ARCHITECT FIX: Sync WebRTC relay for all bulk-added cameras
+    eventlet.spawn_n(sync_mediamtx_cameras)
+    
     trigger_monitor_check()
     log_audit('User', current_user.username, f'Bulk added {added_count} cameras')
     return jsonify({'success': True, 'added': added_count, 'errors': errors})
@@ -1522,6 +1526,10 @@ def add_camera():
         conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", 
                      (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', ''))))
         conn.commit()
+        
+        # ARCHITECT FIX: Sync WebRTC relay dynamically without restarting the container
+        eventlet.spawn_n(sync_mediamtx_cameras)
+        
         log_audit('User', current_user.username, f'Added new camera: {name}')
         trigger_monitor_check()
         flash('Camera added.', 'success')
@@ -1541,6 +1549,10 @@ def edit_camera(id):
             conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
                          (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', '')), id))
             conn.commit()
+            
+            # ARCHITECT FIX: Sync WebRTC relay
+            eventlet.spawn_n(sync_mediamtx_cameras)
+            
             log_audit('User', current_user.username, f'Edited camera config: {name}')
             trigger_monitor_check()
             flash('Camera updated.', 'success')
@@ -1566,11 +1578,15 @@ def delete_camera(id):
     conn.execute("DELETE FROM cameras WHERE id = ?", (id,))
     conn.commit()
     conn.close()
+    
+    # ARCHITECT FIX: Sync WebRTC relay to prune the deleted camera path
+    eventlet.spawn_n(sync_mediamtx_cameras)
+    
     log_audit('User', current_user.username, f'Deleted camera: {name}')
     trigger_monitor_check()
     flash('Camera deleted.', 'success')
     return redirect(url_for('index'))
-
+    
 @app.route('/add_user', methods=['POST'])
 @login_required
 @admin_required
@@ -1733,3 +1749,17 @@ except Exception as e: print(f"Startup initialization error: {e}")
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000)
+
+try:
+    init_db()
+    init_logos()
+    os.makedirs('/app/data', exist_ok=True)
+    socketio.start_background_task(monitor_loop)
+    socketio.start_background_task(automated_speedtest_loop)
+    socketio.start_background_task(sync_db_loop)
+    socketio.start_background_task(log_prune_loop)
+    
+    # ADD THIS LINE: Push DB cameras to MediaMTX on boot
+    eventlet.spawn_n(sync_mediamtx_cameras)
+    
+except Exception as e: print(f"Startup initialization error: {e}")
