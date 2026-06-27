@@ -19,6 +19,20 @@ services:
         max-file: "5"
         compress: "true"
 
+  webrtc-relay:
+    image: bluenviron/mediamtx:latest
+    container_name: cctv-webrtc
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
   cctv-dashboard:
     build: .
     container_name: lighthouse-dashboard
