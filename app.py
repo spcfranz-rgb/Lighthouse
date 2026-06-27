@@ -226,7 +226,6 @@ def trigger_monitor_check():
 
 @app.before_request
 def manage_idle_timeout():
-    # ARCHITECT FIX: Update session actively during WebUI proxying to prevent background logout
     if request.endpoint in ['static', 'serve_local_logo'] or request.path.startswith('/tunnel/'):
         if current_user.is_authenticated:
             session['last_active'] = time.time()
@@ -338,28 +337,33 @@ def init_db():
     conn.commit()
     conn.close()
 
-def sync_db_loop():
-    while True:
-        time.sleep(300) 
-        if os.path.exists(DB_PATH_RAM):
-            try:
-                source = sqlite3.connect(DB_PATH_RAM)
-                dest = sqlite3.connect(DB_PATH_DISK)
-                dest.execute("PRAGMA journal_mode=DELETE;")
-                with dest: source.backup(dest)
-                dest.close()
-                source.close()
-            except Exception: pass
-
-def graceful_shutdown(*args):
+def _perform_disk_sync():
+    """Executes the SQLite backup via C-API. MUST be run in a tpool thread to prevent Eventlet blocking."""
     if os.path.exists(DB_PATH_RAM):
         try:
             source = sqlite3.connect(DB_PATH_RAM)
             dest = sqlite3.connect(DB_PATH_DISK)
-            with dest: source.backup(dest)
+            dest.execute("PRAGMA journal_mode=DELETE;")
+            with dest: 
+                source.backup(dest)
             dest.close()
             source.close()
-        except Exception: pass
+        except Exception as e: 
+            print(f"Disk sync failed: {e}")
+
+def force_disk_sync():
+    """Fires a non-blocking background task to flush RAM to the SD card immediately on CRUD updates."""
+    eventlet.spawn_n(eventlet.tpool.execute, _perform_disk_sync)
+
+def sync_db_loop():
+    """Standard 5-minute interval sync for high-frequency telemetry/logs."""
+    while True:
+        time.sleep(300) 
+        eventlet.tpool.execute(_perform_disk_sync)
+
+def graceful_shutdown(*args):
+    """Ensures final writes are flushed to SD card on container SIGTERM."""
+    _perform_disk_sync()
 
 atexit.register(graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
@@ -374,6 +378,7 @@ def log_prune_loop():
             conn.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
             conn.commit()
             conn.close()
+            force_disk_sync()
         except Exception: pass
 
 # ==========================================
@@ -384,7 +389,6 @@ mqtt_client = None
 mqtt_prefix_global = 'zabbix/cctv'
 
 def get_primary_ip():
-    """Detects the default outbound IPv4 gateway to force Speedtest socket bindings."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -420,7 +424,6 @@ def is_port_open(target, port, timeout=2):
 
 def is_stream_active(url):
     try:
-        # ARCHITECT FIX: Moved ffprobe call to tpool to prevent deep C-level network hangs from blocking the event loop
         response = eventlet.tpool.execute(subprocess.call, ['ffprobe', '-rtsp_transport', 'tcp', '-v', 'error', '-i', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         return response == 0
     except Exception: return False
@@ -616,6 +619,7 @@ def automated_speedtest_loop():
                         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('latest_speedtest', ?)", (st_data,))
                         conn.commit()
                         conn.close()
+                        force_disk_sync()
                         
                         socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string, 'timestamp': now})
         except Exception as e:
@@ -654,6 +658,8 @@ def monitor_loop():
         send_failover_email("CRITICAL: Lighthouse MQTT Offline", "The edge gateway failed to connect to the Zabbix broker on boot. Email failover engaged.")
         
     while True:
+        now = time.time()
+        
         try:
             is_mqtt_up = mqtt_client.is_connected() if mqtt_client else False
             socketio.emit('gateway_status', {'mqtt': is_mqtt_up, 'ui': True})
@@ -664,6 +670,11 @@ def monitor_loop():
             dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
             interval = int(dynamic_settings.get('check_interval', 60))
             
+            # ARCHITECT FIX: Self-Healing WebRTC check.
+            # If time modulo 5 mins hits, sync MediaMTX to catch independent sidecar reboots.
+            if int(now) % 300 < int(interval):
+                eventlet.spawn_n(sync_mediamtx_cameras)
+            
             cursor.execute("SELECT * FROM switches")
             switches = [dict(row) for row in cursor.fetchall()]
             
@@ -671,7 +682,6 @@ def monitor_loop():
             all_cameras = [dict(row) for row in cursor.fetchall()]
             conn.close()
             
-            now = time.time()
             pending_db_updates = []
             pending_mac_updates = []
 
@@ -776,7 +786,6 @@ def monitor_loop():
                             new_c_stat = 'UNREACHABLE (Switch Down)'
                         queue_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
-            # ARCHITECT FIX: Added GreenPool processing for Standalone Cameras to prevent crash
             standalone_results = {}
             if standalone_cameras:
                 pool = eventlet.greenpool.GreenPool(size=20)
@@ -789,7 +798,6 @@ def monitor_loop():
                 c_until = cam['silenced_until'] or 0
                 cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (c_until > now)
                 
-                # Safely fetch from the properly populated standalone results dictionary
                 cam_up, stream_ok, snap_bytes = standalone_results.get(cam_id, (False, False, None))
                 is_frozen = False
                 
@@ -862,12 +870,8 @@ def sync_mediamtx_cameras():
         cameras = conn.execute("SELECT id, stream_url, username, password FROM cameras").fetchall()
         conn.close()
 
-        # Fetch currently configured paths in MediaMTX
         resp = requests.get(MEDIAMTX_API, timeout=3)
-        if resp.status_code == 200:
-            current_paths = resp.json().get('items', {})
-        else:
-            current_paths = {}
+        current_paths = resp.json().get('items', {}) if resp.status_code == 200 else {}
 
         configured_cam_ids = set()
 
@@ -882,17 +886,15 @@ def sync_mediamtx_cameras():
 
             payload = {
                 "source": auth_url,
-                "sourceOnDemand": True, # Only pull the RTSP stream when a user is actively watching
+                "sourceOnDemand": True,
                 "runOnDemandCloseAfter": "10s"
             }
 
-            # Add or Update the path
             if cam_id not in current_paths:
                 requests.post(f"{MEDIAMTX_API}/{cam_id}", json=payload, timeout=3)
             elif current_paths[cam_id].get('source') != auth_url:
                 requests.patch(f"{MEDIAMTX_API}/{cam_id}", json=payload, timeout=3)
 
-        # Prune deleted cameras from MediaMTX
         for path_name in current_paths:
             if path_name.startswith("cam_") and path_name not in configured_cam_ids:
                 requests.delete(f"{MEDIAMTX_API}/{path_name}", timeout=3)
@@ -900,18 +902,14 @@ def sync_mediamtx_cameras():
     except Exception as e:
         print(f"MediaMTX Sync Error: {e}")
 
-# Secure WHEP reverse-proxy route
 @app.route('/api/webrtc/<int:cam_id>/whep', methods=['POST'])
 @login_required
 @operator_required
 def webrtc_whep(cam_id):
-    """Securely proxies the WebRTC SDP offer to the local MediaMTX instance."""
     try:
         sdp_offer = request.data
-        if not sdp_offer:
-            return "Missing SDP offer", 400
+        if not sdp_offer: return "Missing SDP offer", 400
 
-        # ARCHITECT FIX: Updated port from 8889 to 8189 to match mediamtx.yml
         resp = requests.post(
             f"http://127.0.0.1:8189/cam_{cam_id}/whep", 
             data=sdp_offer,
@@ -919,10 +917,8 @@ def webrtc_whep(cam_id):
             timeout=5
         )
         
-        if resp.status_code == 201:
-            return Response(resp.content, mimetype='application/sdp')
-        else:
-            return f"MediaMTX rejected offer: {resp.text}", 502
+        if resp.status_code == 201: return Response(resp.content, mimetype='application/sdp')
+        else: return f"MediaMTX rejected offer: {resp.text}", 502
 
     except requests.exceptions.RequestException as e:
         return f"WebRTC Relay Offline: {str(e)}", 502
@@ -1028,6 +1024,7 @@ def auth_callback(provider):
         
     conn.commit()
     conn.close()
+    force_disk_sync()
     
     login_user(User(user_id, username, role))
     log_audit('System', username, f'User Logged In ({provider.capitalize()} SSO)')
@@ -1186,6 +1183,9 @@ def import_config():
 
         conn.commit()
         conn.close()
+        
+        eventlet.spawn_n(sync_mediamtx_cameras)
+        force_disk_sync()
         trigger_monitor_check()
         log_audit('User', current_user.username, 'Imported configuration via CSV')
         flash('CSV Configuration imported successfully.', 'success')
@@ -1262,9 +1262,8 @@ def add_cameras_bulk():
     conn.commit()
     conn.close()
     
-    # ARCHITECT FIX: Sync WebRTC relay for all bulk-added cameras
     eventlet.spawn_n(sync_mediamtx_cameras)
-    
+    force_disk_sync()
     trigger_monitor_check()
     log_audit('User', current_user.username, f'Bulk added {added_count} cameras')
     return jsonify({'success': True, 'added': added_count, 'errors': errors})
@@ -1292,6 +1291,7 @@ def toggle_silence(device_type, id):
     
     action_text = f"Silenced {device_type} '{device_name}' for {hours}h" if hours > 0 else f"Removed silence from {device_type} '{device_name}'"
     log_audit('User', current_user.username, action_text)
+    force_disk_sync()
     trigger_monitor_check()
     
     return jsonify({'success': True})
@@ -1373,6 +1373,7 @@ def run_speedtest():
                     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('latest_speedtest', ?)", (st_data,))
                     conn.commit()
                     conn.close()
+                    force_disk_sync()
                 except Exception as e: print(f"DB Error saving speedtest: {e}")
 
                 socketio.emit('speedtest_result', {'success': True, 'download': f"{download} Mbps", 'upload': f"{upload} Mbps", 'ping': f"{ping} ms", 'isp': data.get('isp', 'Unknown'), 'server': server_string, 'timestamp': now}, to=sid)
@@ -1433,6 +1434,7 @@ def update_settings():
     conn.commit()
     conn.close()
     log_audit('User', current_user.username, 'Updated Global Gateway Settings (MQTT/SMTP/Alerts)') 
+    force_disk_sync()
     trigger_monitor_check()
     flash('Settings updated.', 'success')
     return redirect(url_for('index'))
@@ -1473,6 +1475,7 @@ def add_switch():
         conn.execute("INSERT INTO switches (name, ip) VALUES (?, ?)", (name, request.form['ip']))
         conn.commit()
         log_audit('User', current_user.username, f'Added new switch: {name}')
+        force_disk_sync()
         trigger_monitor_check()
         flash('Switch added.', 'success')
     except sqlite3.IntegrityError: flash('Switch name already exists.', 'danger')
@@ -1490,6 +1493,7 @@ def edit_switch(id):
             conn.execute("UPDATE switches SET name = ?, ip = ? WHERE id = ?", (name, request.form['ip'], id))
             conn.commit()
             log_audit('User', current_user.username, f'Edited switch config: {name}')
+            force_disk_sync()
             trigger_monitor_check()
             flash('Switch updated.', 'success')
             conn.close()
@@ -1511,6 +1515,7 @@ def delete_switch(id):
     conn.commit()
     conn.close()
     log_audit('User', current_user.username, f'Deleted switch: {name}')
+    force_disk_sync()
     trigger_monitor_check()
     flash('Switch deleted.', 'success')
     return redirect(url_for('index'))
@@ -1526,11 +1531,9 @@ def add_camera():
         conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", 
                      (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', ''))))
         conn.commit()
-        
-        # ARCHITECT FIX: Sync WebRTC relay dynamically without restarting the container
         eventlet.spawn_n(sync_mediamtx_cameras)
-        
         log_audit('User', current_user.username, f'Added new camera: {name}')
+        force_disk_sync()
         trigger_monitor_check()
         flash('Camera added.', 'success')
     except sqlite3.IntegrityError: flash('Camera name already exists.', 'danger')
@@ -1549,11 +1552,9 @@ def edit_camera(id):
             conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
                          (switch_id, name, request.form['ip'], request.form['stream_url'], request.form.get('manufacturer', 'Other'), request.form.get('username', ''), encrypt_pwd(request.form.get('password', '')), id))
             conn.commit()
-            
-            # ARCHITECT FIX: Sync WebRTC relay
             eventlet.spawn_n(sync_mediamtx_cameras)
-            
             log_audit('User', current_user.username, f'Edited camera config: {name}')
+            force_disk_sync()
             trigger_monitor_check()
             flash('Camera updated.', 'success')
             conn.close()
@@ -1578,11 +1579,9 @@ def delete_camera(id):
     conn.execute("DELETE FROM cameras WHERE id = ?", (id,))
     conn.commit()
     conn.close()
-    
-    # ARCHITECT FIX: Sync WebRTC relay to prune the deleted camera path
     eventlet.spawn_n(sync_mediamtx_cameras)
-    
     log_audit('User', current_user.username, f'Deleted camera: {name}')
+    force_disk_sync()
     trigger_monitor_check()
     flash('Camera deleted.', 'success')
     return redirect(url_for('index'))
@@ -1599,6 +1598,7 @@ def add_user():
         conn.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, password, role))
         conn.commit()
         log_audit('User', current_user.username, f'Provisioned new account for: {username}')
+        force_disk_sync()
         flash('User added.', 'success')
     except sqlite3.IntegrityError: flash('Username already exists.', 'danger')
     conn.close()
@@ -1618,6 +1618,7 @@ def delete_user(id):
     conn.commit()
     conn.close()
     log_audit('User', current_user.username, f'Deleted account: {uname}')
+    force_disk_sync()
     flash('User deleted.', 'success')
     return redirect(url_for('index'))
 
