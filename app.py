@@ -226,7 +226,10 @@ def trigger_monitor_check():
 
 @app.before_request
 def manage_idle_timeout():
+    # ARCHITECT FIX: Update session actively during WebUI proxying to prevent background logout
     if request.endpoint in ['static', 'serve_local_logo'] or request.path.startswith('/tunnel/'):
+        if current_user.is_authenticated:
+            session['last_active'] = time.time()
         return 
         
     if current_user.is_authenticated:
@@ -417,9 +420,10 @@ def is_port_open(target, port, timeout=2):
 
 def is_stream_active(url):
     try:
-        response = subprocess.call(['ffprobe', '-rtsp_transport', 'tcp', '-v', 'error', '-i', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        # ARCHITECT FIX: Moved ffprobe call to tpool to prevent deep C-level network hangs from blocking the event loop
+        response = eventlet.tpool.execute(subprocess.call, ['ffprobe', '-rtsp_transport', 'tcp', '-v', 'error', '-i', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         return response == 0
-    except subprocess.TimeoutExpired: return False
+    except Exception: return False
 
 def get_mac_address(ip):
     try:
@@ -772,10 +776,21 @@ def monitor_loop():
                             new_c_stat = 'UNREACHABLE (Switch Down)'
                         queue_status('cameras', cam['id'], cam['name'], 'Camera', cam['status'], new_c_stat)
 
+            # ARCHITECT FIX: Added GreenPool processing for Standalone Cameras to prevent crash
+            standalone_results = {}
+            if standalone_cameras:
+                pool = eventlet.greenpool.GreenPool(size=20)
+                standalone_dicts = [dict(c, password=decrypt_pwd(c['password'])) for c in standalone_cameras]
+                for c_id, cam_up, stream_ok, snap_bytes, fetched_mac in pool.imap(threaded_camera_check, standalone_dicts):
+                    standalone_results[c_id] = (cam_up, stream_ok, snap_bytes)
+                    if fetched_mac: pending_mac_updates.append(('cameras', fetched_mac.upper(), c_id))
+
             for cam in standalone_cameras:
                 c_until = cam['silenced_until'] or 0
                 cam_id, cam_name, cam_silenced = cam['id'], cam['name'], (c_until > now)
-                cam_up, stream_ok, snap_bytes = standalone_results[cam_id]
+                
+                # Safely fetch from the properly populated standalone results dictionary
+                cam_up, stream_ok, snap_bytes = standalone_results.get(cam_id, (False, False, None))
                 is_frozen = False
                 
                 if cam_up:
