@@ -72,8 +72,8 @@ def apply_csp(response):
     response.headers['Content-Security-Policy'] = csp
     return response
 
-# Initialize WebSockets
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
+# ARCHITECT FIX: Removed CORS wildcard to prevent cross-site WebSocket hijacking
+socketio = SocketIO(app, async_mode='eventlet', logger=False, engineio_logger=False)
 
 LOCAL_COMPANY_LOGO = None
 LOCAL_CUSTOMER_LOGO = None
@@ -274,6 +274,7 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS cameras (id INTEGER PRIMARY KEY AUTOINCREMENT, switch_id INTEGER, name TEXT UNIQUE, ip TEXT, stream_url TEXT, status TEXT DEFAULT 'UNKNOWN', FOREIGN KEY(switch_id) REFERENCES switches(id))")
     cursor.execute("CREATE TABLE IF NOT EXISTS event_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, device_type TEXT, device_name TEXT, status TEXT)")
     
+    # Table migrations safely handled
     try: cursor.execute("ALTER TABLE cameras ADD COLUMN manufacturer TEXT DEFAULT 'Other'")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE cameras ADD COLUMN username TEXT DEFAULT ''")
@@ -310,22 +311,6 @@ def init_db():
             ('st_alert_ping', '0')
         ]
         cursor.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", settings)
-    else:
-        try: cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('idle_timeout', '20')")
-        except sqlite3.OperationalError: pass
-        try:
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_host', '')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_port', '587')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_user', '')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_pass', '')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('smtp_target', '')")
-        except sqlite3.OperationalError: pass
-        try:
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('st_interval', '0')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('st_alert_dl', '0')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('st_alert_ul', '0')")
-            cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('st_alert_ping', '0')")
-        except sqlite3.OperationalError: pass
         
     cursor.execute("SELECT count(*) FROM users")
     if cursor.fetchone()[0] == 0:
@@ -338,7 +323,7 @@ def init_db():
     conn.close()
 
 def _perform_disk_sync():
-    """Executes the SQLite backup via C-API. MUST be run in a tpool thread to prevent Eventlet blocking."""
+    """Executes the SQLite backup via C-API. Runs in a tpool thread to prevent Eventlet blocking."""
     if os.path.exists(DB_PATH_RAM):
         try:
             source = sqlite3.connect(DB_PATH_RAM)
@@ -351,14 +336,26 @@ def _perform_disk_sync():
         except Exception as e: 
             print(f"Disk sync failed: {e}")
 
+# ARCHITECT FIX: Debounce database writes to prevent SQLite locks during bulk inserts
+_disk_sync_timer = None
+
 def force_disk_sync():
-    """Fires a non-blocking background task to flush RAM to the SD card immediately on CRUD updates."""
-    eventlet.spawn_n(eventlet.tpool.execute, _perform_disk_sync)
+    """Queues a non-blocking background task to flush RAM to the SD card, debounced by 2 seconds."""
+    global _disk_sync_timer
+    if _disk_sync_timer is not None:
+        _disk_sync_timer.cancel()
+    
+    def _execute_sync():
+        global _disk_sync_timer
+        _disk_sync_timer = None
+        eventlet.tpool.execute(_perform_disk_sync)
+
+    _disk_sync_timer = eventlet.spawn_after(2.0, _execute_sync)
 
 def sync_db_loop():
     """Standard 5-minute interval sync for high-frequency telemetry/logs."""
     while True:
-        time.sleep(300) 
+        eventlet.sleep(300) 
         eventlet.tpool.execute(_perform_disk_sync)
 
 def graceful_shutdown(*args):
@@ -371,7 +368,7 @@ signal.signal(signal.SIGINT, graceful_shutdown)
 
 def log_prune_loop():
     while True:
-        time.sleep(86400) 
+        eventlet.sleep(86400) 
         try:
             conn = get_db()
             seven_days_ago = time.time() - (7 * 24 * 3600)
@@ -413,8 +410,9 @@ def is_valid_target(target):
     if re.match(r'^[A-Za-z0-9_.-]+$', target): return True
     return False
 
+# ARCHITECT FIX: Offload synchronous blocking subprocess to the C-thread pool
 def is_pingable(target):
-    response = subprocess.call(['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    response = eventlet.tpool.execute(subprocess.call, ['ping', '-c', '1', '-W', '1', target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return response == 0
 
 def is_port_open(target, port, timeout=2):
@@ -454,7 +452,22 @@ def get_camlan_arp_table():
     except FileNotFoundError: pass
     return arp_entries
 
+# ARCHITECT FIX: Dedicated worker for FFMPEG to prevent deadlocks on proc.communicate()
+def _run_ffmpeg_snapshot(stream_url):
+    cmd = ['ffmpeg', '-y', '-rtsp_transport', 'tcp', '-i', stream_url, '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-']
+    try:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            stdout, _ = proc.communicate(timeout=5)
+            if proc.returncode == 0: 
+                return stdout
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+    except Exception: pass
+    return None
+
 def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
+    # Manufacturer HTTP Fallbacks
     if mfg and mfg != 'Other':
         url = None
         auth_in_url = False
@@ -468,6 +481,7 @@ def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
             
         if url:
             try:
+                # requests is globally monkey-patched by eventlet, so this is non-blocking.
                 if auth_in_url: resp = requests.get(url, timeout=3)
                 else:
                     resp = requests.get(url, auth=HTTPDigestAuth(user, pwd), timeout=3)
@@ -476,18 +490,8 @@ def get_snapshot_bytes(ip, mfg, user, pwd, stream_url):
                 if resp.status_code == 200 and 'image' in resp.headers.get('Content-Type', ''): return resp.content
             except Exception: pass 
                 
-    try:
-        cmd = ['ffmpeg', '-y', '-rtsp_transport', 'tcp', '-i', stream_url, '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-']
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
-            try:
-                stdout, _ = proc.communicate(timeout=5)
-                if proc.returncode == 0: 
-                    return stdout
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-    except Exception: pass
-    return None
+    # Fallback to FFMPEG execution (Safe inside tpool)
+    return eventlet.tpool.execute(_run_ffmpeg_snapshot, stream_url)
 
 def threaded_camera_check(cam):
     cam_up = is_pingable(cam['ip']) or is_port_open(cam['ip'], 554) or is_port_open(cam['ip'], 80)
@@ -540,11 +544,11 @@ def send_failover_email(subject, body):
 
 def automated_speedtest_loop():
     global mqtt_client, mqtt_prefix_global
-    time.sleep(30)
+    eventlet.sleep(30)
     last_run = 0
     
     while True:
-        time.sleep(60)
+        eventlet.sleep(60)
         try:
             conn = get_db()
             settings_dict = {row['key']: row['value'] for row in conn.execute("SELECT key, value FROM settings").fetchall()}
