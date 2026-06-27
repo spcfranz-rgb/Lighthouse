@@ -380,15 +380,20 @@ SNAPSHOT_SEMAPHORE = eventlet.semaphore.Semaphore(4)
 mqtt_client = None
 mqtt_prefix_global = 'zabbix/cctv'
 
-def get_local_subnet():
+def get_primary_ip():
+    """Detects the default outbound IPv4 gateway to force Speedtest socket bindings."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
-        return f"{local_ip.rsplit('.', 1)[0]}.0/24"
+        return local_ip
     except Exception:
-        return "192.168.1.0/24"
+        return None
+
+def get_local_subnet():
+    ip = get_primary_ip()
+    return f"{ip.rsplit('.', 1)[0]}.0/24" if ip else "192.168.1.0/24"
 
 def is_valid_target(target):
     if not target: return False
@@ -544,10 +549,15 @@ def automated_speedtest_loop():
                 last_run = time.time()
                 
                 env = os.environ.copy()
-                env['HOME'] = '/tmp'
+                env['HOME'] = '/app/data_ram'
+                
+                cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
+                primary_ip = get_primary_ip()
+                if primary_ip:
+                    cmd.extend(['-i', primary_ip])
                 
                 process = eventlet.tpool.execute(
-                    subprocess.run, ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json'], capture_output=True, text=True, timeout=60, env=env
+                    subprocess.run, cmd, capture_output=True, text=True, timeout=60, env=env
                 )
                 
                 if process.returncode == 0:
@@ -641,7 +651,6 @@ def monitor_loop():
         
     while True:
         try:
-            # Inject Gateway Status Telemetry to the UI
             is_mqtt_up = mqtt_client.is_connected() if mqtt_client else False
             socketio.emit('gateway_status', {'mqtt': is_mqtt_up, 'ui': True})
 
@@ -1234,9 +1243,12 @@ def run_speedtest():
     def execute_test():
         try:
             env = os.environ.copy()
-            env['HOME'] = '/tmp'
+            env['HOME'] = '/app/data_ram'
             
             cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-f', 'json']
+            primary_ip = get_primary_ip()
+            if primary_ip:
+                cmd.extend(['-i', primary_ip])
             
             process = eventlet.tpool.execute(subprocess.run, cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60, env=env)
             
@@ -1274,7 +1286,10 @@ def run_speedtest():
                 elif process.stderr: err_msg = process.stderr.strip()
                 
                 try:
-                    fallback = eventlet.tpool.execute(subprocess.run, ['speedtest', '--accept-license', '--accept-gdpr', '-L', '-f', 'json'], capture_output=True, text=True, timeout=10, env=env)
+                    fallback_cmd = ['speedtest', '--accept-license', '--accept-gdpr', '-L', '-f', 'json']
+                    if primary_ip:
+                        fallback_cmd.extend(['-i', primary_ip])
+                    fallback = eventlet.tpool.execute(subprocess.run, fallback_cmd, capture_output=True, text=True, timeout=10, env=env)
                     
                     fb_data = None
                     for line in reversed(fallback.stdout.splitlines()):
