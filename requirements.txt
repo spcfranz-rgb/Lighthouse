@@ -13,3 +13,4 @@ getmac==0.9.4
 Pillow==10.2.0
 ImageHash==4.3.1
 Flask-WTF==1.2.1
+onvif-zeep==0.2.12
