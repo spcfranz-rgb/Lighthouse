@@ -276,6 +276,7 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS switches (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, ip TEXT, status TEXT DEFAULT 'UNKNOWN')")
+    cursor.execute("CREATE TABLE IF NOT EXISTS nvrs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, ip TEXT, status TEXT DEFAULT 'UNKNOWN')")
     cursor.execute("CREATE TABLE IF NOT EXISTS cameras (id INTEGER PRIMARY KEY AUTOINCREMENT, switch_id INTEGER, name TEXT UNIQUE, ip TEXT, stream_url TEXT, status TEXT DEFAULT 'UNKNOWN', FOREIGN KEY(switch_id) REFERENCES switches(id))")
     cursor.execute("CREATE TABLE IF NOT EXISTS event_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, device_type TEXT, device_name TEXT, status TEXT)")
     
@@ -288,9 +289,13 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE switches ADD COLUMN silenced_until REAL DEFAULT 0")
     except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE nvrs ADD COLUMN silenced_until REAL DEFAULT 0")
+    except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE cameras ADD COLUMN silenced_until REAL DEFAULT 0")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE switches ADD COLUMN mac_address TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE nvrs ADD COLUMN mac_address TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE cameras ADD COLUMN mac_address TEXT DEFAULT ''")
     except sqlite3.OperationalError: pass
@@ -534,7 +539,6 @@ def get_camlan_arp_table():
     except FileNotFoundError: pass
     return arp_entries
 
-# ARCHITECT FIX: Dedicated worker for FFMPEG to prevent deadlocks on proc.communicate()
 def _run_ffmpeg_snapshot(stream_url):
     cmd = ['ffmpeg', '-y', '-rtsp_transport', 'tcp', '-i', stream_url, '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-']
     try:
@@ -756,13 +760,14 @@ def monitor_loop():
             dynamic_settings = {row['key']: row['value'] for row in cursor.fetchall()}
             interval = int(dynamic_settings.get('check_interval', 60))
             
-            # ARCHITECT FIX: Self-Healing WebRTC check.
-            # If time modulo 5 mins hits, sync MediaMTX to catch independent sidecar reboots.
             if int(now) % 300 < int(interval):
                 eventlet.spawn_n(sync_mediamtx_cameras)
             
             cursor.execute("SELECT * FROM switches")
             switches = [dict(row) for row in cursor.fetchall()]
+
+            cursor.execute("SELECT * FROM nvrs")
+            nvrs = [dict(row) for row in cursor.fetchall()]
             
             cursor.execute("SELECT * FROM cameras")
             all_cameras = [dict(row) for row in cursor.fetchall()]
@@ -783,6 +788,28 @@ def monitor_loop():
                         if not mqtt_client.is_connected():
                             send_failover_email(f"FAILOVER ALERT: {item_name} is {new_status}", f"The {dev_type} '{item_name}' transitioned to a critical state ({new_status}).\n\nThis alert was routed via SMTP because the primary MQTT connection to Zabbix is currently offline.")
 
+            # Process NVRs
+            for nvr in nvrs:
+                nvr_id, nvr_name, nvr_ip = nvr['id'], nvr['name'], nvr['ip']
+                s_until, mac = nvr['silenced_until'] or 0, nvr['mac_address'] or ''
+                silenced = s_until > now
+                is_up = is_pingable(nvr_ip) or is_port_open(nvr_ip, 80) or is_port_open(nvr_ip, 443) or is_port_open(nvr_ip, 554)
+                
+                nvr_payload = "MAINTENANCE" if silenced else ("UP" if is_up else "OFFLINE")
+                mqtt_client.publish(f"{mqtt_prefix_global}/{nvr_name}/ping", nvr_payload, retain=True)
+                
+                if is_up:
+                    if not mac:
+                        fetched_mac = get_mac_address(nvr_ip)
+                        if fetched_mac: pending_mac_updates.append(('nvrs', fetched_mac.upper(), nvr_id))
+                            
+                    new_s_stat = 'UP' if not silenced else 'UP (Silenced)'
+                    queue_status('nvrs', nvr_id, nvr_name, 'NVR', nvr['status'], new_s_stat)
+                else:
+                    new_s_stat = 'DOWN' if not silenced else 'DOWN (Silenced)'
+                    queue_status('nvrs', nvr_id, nvr_name, 'NVR', nvr['status'], new_s_stat)
+
+            # Process Switches
             cameras_by_switch = {}
             standalone_cameras = []
             for c in all_cameras:
@@ -1021,7 +1048,6 @@ def probe_onvif_camera(ip, user, pwd):
     CRITICAL: This function performs heavy XML parsing and MUST be run 
     inside eventlet.tpool.execute() to prevent blocking the async loop.
     """
-    # Try common ONVIF ports. Port 80 is standard, but 8080 and 8899 are frequent on cheaper IP cameras.
     for port in [80, 8080, 8899]:
         try:
             cam = ONVIFCamera(ip, port, user, pwd)
@@ -1189,6 +1215,7 @@ def index():
     now = time.time()
     conn = get_db()
     switches = conn.execute("SELECT *, (IFNULL(silenced_until, 0) > ?) as is_silenced FROM switches", (now,)).fetchall()
+    nvrs = conn.execute("SELECT *, (IFNULL(silenced_until, 0) > ?) as is_silenced FROM nvrs", (now,)).fetchall()
     cameras = conn.execute("""
         SELECT c.*, s.name as switch_name, 
                ((IFNULL(c.silenced_until, 0) > ?) OR (IFNULL(s.silenced_until, 0) > ?)) as is_silenced 
@@ -1208,7 +1235,7 @@ def index():
         
     default_subnet = get_local_subnet()
     
-    return render_template('index.html', switches=switches, cameras=cameras, settings=settings_dict, users=users, default_subnet=default_subnet, latest_speedtest=latest_speedtest)
+    return render_template('index.html', switches=switches, nvrs=nvrs, cameras=cameras, settings=settings_dict, users=users, default_subnet=default_subnet, latest_speedtest=latest_speedtest)
     
 @app.route('/history')
 @login_required
@@ -1246,6 +1273,9 @@ def export_config():
     switches = conn.execute("SELECT name, ip FROM switches").fetchall()
     for s in switches: cw.writerow(['Switch', '', s['name'], s['ip'], '', '', '', ''])
         
+    nvrs = conn.execute("SELECT name, ip FROM nvrs").fetchall()
+    for n in nvrs: cw.writerow(['NVR', '', n['name'], n['ip'], '', '', '', ''])
+        
     cameras = conn.execute("""
         SELECT c.name, c.ip, c.stream_url, c.manufacturer, c.username, c.password, s.name as switch_name 
         FROM cameras c LEFT JOIN switches s ON c.switch_id = s.id
@@ -1266,6 +1296,7 @@ def download_template():
     cw = csv.writer(si)
     cw.writerow(['Device_Type', 'Parent_Switch', 'Device_Name', 'IP_Address', 'Stream_URL', 'Manufacturer', 'Username', 'Password'])
     cw.writerow(['Switch', '', 'Core-Switch-01', '192.168.1.5', '', '', '', ''])
+    cw.writerow(['NVR', '', 'Main-NVR-01', '192.168.1.10', '', '', '', ''])
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment;filename=cctv_import_template.csv"})
 
 @app.route('/import_config', methods=['POST'])
@@ -1301,6 +1332,12 @@ def import_config():
                     else:
                         cursor = conn.execute("INSERT INTO switches (name, ip) VALUES (?, ?)", (name, ip))
                         switch_map[name] = cursor.lastrowid
+            elif dtype == 'nvr':
+                name, ip = row.get('Device_Name', '').strip(), row.get('IP_Address', '').strip()
+                if name:
+                    existing = conn.execute("SELECT id FROM nvrs WHERE name = ?", (name,)).fetchone()
+                    if existing: conn.execute("UPDATE nvrs SET ip = ? WHERE id = ?", (ip, existing['id']))
+                    else: conn.execute("INSERT INTO nvrs (name, ip) VALUES (?, ?)", (name, ip))
                         
         for row in rows:
             dtype = row.get('Device_Type', '').strip().lower()
@@ -1346,28 +1383,20 @@ def fetch_arp_table():
         subnet = get_local_subnet()
         network = ipaddress.ip_network(subnet, strict=False)
         
-        # 1. The UDP Kernel-Force Function
         def force_arp_resolution(ip_str):
             try:
-                # Send a 1-byte dummy payload to a random closed port.
-                # This forces the host OS to instantly transmit an ARP Request to the physical switch.
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.setblocking(False)
                 s.sendto(b'\x00', (ip_str, 53535))
                 s.close()
             except Exception: pass
 
-        # 2. Blast the subnet concurrently using Eventlet's green threads
-        # This takes mere milliseconds since UDP is connectionless
         hosts = [str(ip) for ip in network.hosts()]
         pool = eventlet.greenpool.GreenPool(size=254)
         for _ in pool.imap(force_arp_resolution, hosts):
             pass 
             
-        # 3. Give the kernel 500ms to receive the L2 replies and write them to procfs
         eventlet.sleep(0.5)
-        
-        # 4. Read the freshly populated physical cache
         devices = get_camlan_arp_table()
         
         return jsonify({
@@ -1411,8 +1440,6 @@ def scan_network():
     new_discoveries = [ip for ip in discovered_ips if ip not in existing_cameras]
     return jsonify({'success': True, 'discovered': new_discoveries, 'total_found': len(discovered_ips), 'already_added': len(discovered_ips) - len(new_discoveries)})
 
-
-# ARCHITECT FIX: Deep ONVIF integration during the bulk-add workflow
 @app.route('/api/add_cameras_bulk', methods=['POST'])
 @login_required
 @admin_required
@@ -1431,26 +1458,18 @@ def add_cameras_bulk():
     conn = get_db()
     added_count, errors = 0, []
     
-    # Process each discovered IP inside our GreenPool to prevent blocking
     def process_camera(ip):
-        # Fire the heavy ONVIF probe into the OS thread pool
         onvif_data = eventlet.tpool.execute(probe_onvif_camera, ip, user, raw_pwd)
-        
-        # Default fallbacks if ONVIF negotiation completely fails
         mfg = fallback_mfg
         stream_url = f"rtsp://{ip}:554/live"
         name = f"AutoCam-{ip.replace('.', '-')}"
         mac = None
         
-        # Override with exact hardware data if ONVIF succeeded
         if onvif_data.get('success'):
             mfg = onvif_data.get('make', fallback_mfg)
             model = onvif_data.get('model', '')
-            
-            # Smart Naming (e.g., Hanwha-XNV-6080R-105)
             if model:
                 name = f"{mfg}-{model}-{ip.split('.')[-1]}"
-                
             if onvif_data.get('stream_url'):
                 stream_url = onvif_data['stream_url']
             if onvif_data.get('mac'):
@@ -1494,6 +1513,10 @@ def toggle_silence(device_type, id):
     if device_type == 'switch':
         conn.execute("UPDATE switches SET silenced_until = ? WHERE id = ?", (silence_until, id))
         row = conn.execute("SELECT name FROM switches WHERE id = ?", (id,)).fetchone()
+        if row: device_name = row['name']
+    elif device_type == 'nvr':
+        conn.execute("UPDATE nvrs SET silenced_until = ? WHERE id = ?", (silence_until, id))
+        row = conn.execute("SELECT name FROM nvrs WHERE id = ?", (id,)).fetchone()
         if row: device_name = row['name']
     elif device_type == 'camera':
         conn.execute("UPDATE cameras SET silenced_until = ? WHERE id = ?", (silence_until, id))
@@ -1734,6 +1757,62 @@ def delete_switch(id):
     flash('Switch deleted.', 'success')
     return redirect(url_for('index'))
 
+@app.route('/add_nvr', methods=['POST'])
+@login_required
+@admin_required
+def add_nvr():
+    conn = get_db()
+    name = request.form['name']
+    try:
+        conn.execute("INSERT INTO nvrs (name, ip) VALUES (?, ?)", (name, request.form['ip']))
+        conn.commit()
+        log_audit('User', current_user.username, f'Added new NVR: {name}')
+        force_disk_sync()
+        trigger_monitor_check()
+        flash('NVR added.', 'success')
+    except sqlite3.IntegrityError: flash('NVR name already exists.', 'danger')
+    finally: conn.close()
+    return redirect(url_for('index'))
+
+@app.route('/edit_nvr/<int:id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_nvr(id):
+    conn = get_db()
+    if request.method == 'POST':
+        name = request.form['name']
+        try:
+            conn.execute("UPDATE nvrs SET name = ?, ip = ? WHERE id = ?", (name, request.form['ip'], id))
+            conn.commit()
+            log_audit('User', current_user.username, f'Edited NVR config: {name}')
+            force_disk_sync()
+            trigger_monitor_check()
+            flash('NVR updated.', 'success')
+            conn.close()
+            return redirect(url_for('index'))
+        except sqlite3.IntegrityError: flash('NVR name already exists.', 'danger')
+    nvr = conn.execute("SELECT * FROM nvrs WHERE id = ?", (id,)).fetchone()
+    conn.close()
+    
+    # We can reuse the edit_switch template format for the NVR since they have the exact same DB schema fields
+    return render_template('edit_switch.html', switch=nvr).replace('Edit Switch', 'Edit NVR').replace('switch', 'nvr').replace('Switch', 'NVR')
+
+@app.route('/delete_nvr/<int:id>', methods=['POST'])
+@login_required
+@admin_required
+def delete_nvr(id):
+    conn = get_db()
+    row = conn.execute("SELECT name FROM nvrs WHERE id = ?", (id,)).fetchone()
+    name = row['name'] if row else "Unknown"
+    conn.execute("DELETE FROM nvrs WHERE id = ?", (id,))
+    conn.commit()
+    conn.close()
+    log_audit('User', current_user.username, f'Deleted NVR: {name}')
+    force_disk_sync()
+    trigger_monitor_check()
+    flash('NVR deleted.', 'success')
+    return redirect(url_for('index'))
+
 @app.route('/add_camera', methods=['POST'])
 @login_required
 @admin_required
@@ -1860,6 +1939,7 @@ def snapshot(id):
 def tunnel(device_type, device_id, req_path):
     conn = get_db()
     if device_type == 'switch': device = conn.execute("SELECT ip FROM switches WHERE id = ?", (device_id,)).fetchone()
+    elif device_type == 'nvr': device = conn.execute("SELECT ip FROM nvrs WHERE id = ?", (device_id,)).fetchone()
     elif device_type == 'camera': device = conn.execute("SELECT ip FROM cameras WHERE id = ?", (device_id,)).fetchone()
     else: return "Invalid device type", 404
     conn.close()
