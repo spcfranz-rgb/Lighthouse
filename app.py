@@ -1424,8 +1424,17 @@ def edit_delete_camera(id):
         switch_id = data.get('switch_id') or None 
         name = data.get('name')
         try:
-            conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
-                         (switch_id, name, data.get('ip'), data.get('stream_url'), data.get('manufacturer', 'Other'), data.get('username', ''), encrypt_pwd(data.get('password', '')), id))
+            pwd_update = data.get('password', '').strip()
+            
+            # If the admin provided a new password, encrypt and save it
+            if pwd_update:
+                conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ?, password = ? WHERE id = ?""", 
+                             (switch_id, name, data.get('ip'), data.get('stream_url'), data.get('manufacturer', 'Other'), data.get('username', ''), encrypt_pwd(pwd_update), id))
+            # If blank, update everything EXCEPT the password
+            else:
+                conn.execute("""UPDATE cameras SET switch_id = ?, name = ?, ip = ?, stream_url = ?, manufacturer = ?, username = ? WHERE id = ?""", 
+                             (switch_id, name, data.get('ip'), data.get('stream_url'), data.get('manufacturer', 'Other'), data.get('username', ''), id))
+                
             conn.commit()
             eventlet.spawn_n(sync_mediamtx_cameras)
             log_audit('User', current_user.username, f'Edited camera config: {name}')
@@ -1434,7 +1443,9 @@ def edit_delete_camera(id):
             return jsonify({'success': True, 'message': 'Camera updated.'})
         except sqlite3.IntegrityError: return jsonify({'success': False, 'message': 'Name exists.'}), 400
         finally: conn.close()
+        
     elif request.method == 'DELETE':
+        # ... (Your existing DELETE logic remains unchanged) ...
         row = conn.execute("SELECT name FROM cameras WHERE id = ?", (id,)).fetchone()
         name = row['name'] if row else "Unknown"
         conn.execute("DELETE FROM cameras WHERE id = ?", (id,))
