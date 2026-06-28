@@ -15,8 +15,9 @@ const router = createRouter({
 
 router.beforeEach(async (to, from, next) => {
   const store = useSystemStore()
-  // Hydrate auth state on first load
-  if (store.user === null && to.name !== 'login') {
+  
+  // ALWAYS hydrate auth state & CSRF token on first load
+  if (!store.csrfToken) {
     await store.checkAuth()
   }
 
