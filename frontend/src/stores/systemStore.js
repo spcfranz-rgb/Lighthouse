@@ -14,7 +14,7 @@ export const useSystemStore = defineStore('system', {
     settings: {},
     users: [],
     latestSpeedtest: null,
-    defaultSubnet: '192.168.1.0/24', // Added for Scanner
+    defaultSubnet: '192.168.1.0/24',
     toasts: []
   }),
   actions: {
@@ -42,7 +42,7 @@ export const useSystemStore = defineStore('system', {
         this.settings = data.settings || {}
         this.users = data.users || []
         this.latestSpeedtest = data.latest_speedtest || null
-        this.defaultSubnet = data.default_subnet || '192.168.1.0/24' // Capture LAN subnet
+        this.defaultSubnet = data.default_subnet || '192.168.1.0/24'
         this.initSocket()
       } catch (error) {
         console.error("Failed to fetch system data:", error)
@@ -71,8 +71,16 @@ export const useSystemStore = defineStore('system', {
         const target = this.devices[data.type]?.find(d => d.id === data.id)
         if (target) target.status = data.status
       })
+      
+      // PERMANENT LISTENER: Always catch automated speed tests running in the background
+      this._socket.on('speedtest_result', (data) => {
+        if (data.success) {
+          this.latestSpeedtest = data;
+        }
+      })
     },
     listen(event, callback) { if (this._socket) this._socket.on(event, callback) },
-    unlisten(event) { if (this._socket) this._socket.off(event) }
+    // FIX: Require the exact callback reference so we don't accidentally wipe the permanent listeners
+    unlisten(event, callback) { if (this._socket) this._socket.off(event, callback) } 
   }
 })
