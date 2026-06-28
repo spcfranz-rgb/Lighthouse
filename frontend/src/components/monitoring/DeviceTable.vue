@@ -29,12 +29,19 @@
               <td>
                 <span class="badge" :class="statusClass(device.status)">{{ device.status }}</span>
               </td>
-              
               <td class="text-end pe-3" v-if="canEdit">
-                <a v-if="isPrivateLocation(device.ip)" :href="`/tunnel/${singularType}/${device.id}/`" target="_blank" class="badge bg-info text-decoration-none me-2">WebUI</a>
-                <button class="btn btn-sm" :class="device.is_silenced ? 'btn-warning' : 'btn-outline-secondary'" @click="toggleSilence(device)" :disabled="working === device.id">
-                  {{ device.is_silenced ? '🔇' : '🔔' }}
-                </button>
+                
+                <div class="btn-group shadow-sm">
+                  <a v-if="isPrivateLocation(device.ip)" :href="`/tunnel/${singularType}/${device.id}/`" target="_blank" class="btn btn-sm btn-info text-decoration-none" title="WebUI Tunnel">🌐</a>
+                  
+                  <button class="btn btn-sm" :class="device.is_silenced ? 'btn-warning' : 'btn-outline-secondary'" @click="toggleSilence(device)" :disabled="working === device.id" title="Toggle Silence">
+                    {{ device.is_silenced ? '🔇' : '🔔' }}
+                  </button>
+
+                  <button v-if="isAdmin" class="btn btn-sm btn-outline-warning" @click="$emit('edit', device, type)" title="Edit Device">✏️</button>
+                  <button v-if="isAdmin" class="btn btn-sm btn-outline-danger" @click="deleteDevice(device)" title="Delete Device">❌</button>
+                </div>
+
               </td>
             </tr>
           </tbody>
@@ -50,14 +57,12 @@ import axios from 'axios'
 import { useSystemStore } from '../../stores/systemStore'
 
 const props = defineProps(['title', 'type', 'devices'])
-const emit = defineEmits(['preview'])
+const emit = defineEmits(['preview', 'edit'])
 const store = useSystemStore()
 const working = ref(null)
 
-// RBAC Gate
-const canEdit = computed(() => {
-  return ['admin', 'operator'].includes(store.user?.role)
-})
+const canEdit = computed(() => ['admin', 'operator'].includes(store.user?.role))
+const isAdmin = computed(() => store.user?.role === 'admin')
 
 const singularType = computed(() => {
   if (props.type === 'switches') return 'switch'
@@ -68,10 +73,7 @@ const singularType = computed(() => {
 
 const statusClass = (status) => {
   if (status === 'UP') return 'bg-success'
-  
-  // NEW: Catch the intermediate state and apply a distinct color (Cyan/Info)
   if (status?.includes('EVALUATING')) return 'bg-info text-dark fw-bold' 
-  
   if (status?.includes('Silenced')) return 'bg-warning text-dark'
   if (status?.includes('DOWN') || status?.includes('UNREACHABLE') || status?.includes('ERR')) return 'bg-danger'
   return 'bg-secondary'
@@ -102,6 +104,18 @@ const toggleSilence = async (device) => {
     store.addToast('Failed to update silence', 'danger')
   } finally {
     working.value = null
+  }
+}
+
+// NEW: Handled natively in the component
+const deleteDevice = async (device) => {
+  if(!confirm(`Are you sure you want to permanently delete ${device.name}?`)) return;
+  try {
+    await axios.delete(`/api/v1/${props.type}/${device.id}`)
+    store.addToast(`${device.name} deleted successfully.`)
+    await store.fetchSystemData()
+  } catch(e) {
+    store.addToast(`Failed to delete ${device.name}.`, 'danger')
   }
 }
 </script>
