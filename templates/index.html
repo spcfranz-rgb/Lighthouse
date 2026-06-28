@@ -748,25 +748,22 @@ async function showPreview(id, name) {
     const img = document.getElementById('previewImg'); 
     const spinner = document.getElementById('previewSpinner');
     
-    // --- 1. Reset UI State ---
+    // Reset UI State
     video.classList.add('d-none');
     img.classList.add('d-none');
     spinner.classList.remove('d-none');
 
-    // --- 2. Cleanup Resources (Previous sessions) ---
+    // Cleanup previous resources
     if (snapshotInterval) clearInterval(snapshotInterval);
     if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
     }
 
-    // --- 3. Modal Event Lifecycle ---
     if (!modalInstance) {
         modalInstance = new bootstrap.Modal(document.getElementById('previewModal'));
         document.getElementById('previewModal').addEventListener('hidden.bs.modal', function () {
             isModalOpen = false;
-            
-            // Critical: Ensure no memory leaks or background network noise
             if (snapshotInterval) clearInterval(snapshotInterval);
             if (video.srcObject) {
                 video.srcObject.getTracks().forEach(track => track.stop());
@@ -782,11 +779,7 @@ async function showPreview(id, name) {
     modalInstance.show();
 
     try {
-        const configuration = {
-            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-            iceTransportPolicy: "all"
-        };
-
+        const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }], iceTransportPolicy: "all" };
         peerConnection = new RTCPeerConnection(configuration);
 
         peerConnection.ontrack = (event) => {
@@ -816,19 +809,23 @@ async function showPreview(id, name) {
     } catch (error) {
         console.error("WebRTC Error:", error);
         spinner.classList.add('d-none');
-        
-        // --- 4. Fallback Execution ---
         showToast('WebRTC failed. Falling back to snapshot (Polling enabled)...', 'warning');
         
-        // Define polling function to bypass cache
-        const refreshSnapshot = () => {
-            img.src = `/snapshot/${id}?t=${new Date().getTime()}`;
-        };
-        
-        refreshSnapshot(); // Trigger initial load immediately
+        const refreshSnapshot = () => { img.src = `/snapshot/${id}?t=${new Date().getTime()}`; };
+        refreshSnapshot();
         img.classList.remove('d-none');
         
-        // Poll every 5 seconds to provide "live-ish" updates
+        const visibilityHandler = () => {
+            if (document.hidden) { clearInterval(snapshotInterval); snapshotInterval = null; } 
+            else if (!snapshotInterval) { refreshSnapshot(); snapshotInterval = setInterval(refreshSnapshot, 5000); }
+        };
+        
+        document.addEventListener("visibilitychange", visibilityHandler);
+        document.getElementById('previewModal').addEventListener('hidden.bs.modal', () => {
+            document.removeEventListener("visibilitychange", visibilityHandler);
+            clearInterval(snapshotInterval);
+        }, { once: true });
+        
         snapshotInterval = setInterval(refreshSnapshot, 5000);
     }
 }
