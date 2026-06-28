@@ -1475,22 +1475,40 @@ def api_toggle_silence():
     silence_until = time.time() + (hours * 3600) if hours > 0 else 0
     conn = get_db()
     device_name = "Unknown"
+    table_name = ""
     
     if device_type == 'switch':
+        table_name = "switches"
         conn.execute("UPDATE switches SET silenced_until = ? WHERE id = ?", (silence_until, dev_id))
         row = conn.execute("SELECT name FROM switches WHERE id = ?", (dev_id,)).fetchone()
         if row: device_name = row['name']
     elif device_type == 'nvr':
+        table_name = "nvrs"
         conn.execute("UPDATE nvrs SET silenced_until = ? WHERE id = ?", (silence_until, dev_id))
         row = conn.execute("SELECT name FROM nvrs WHERE id = ?", (dev_id,)).fetchone()
         if row: device_name = row['name']
     elif device_type == 'camera':
+        table_name = "cameras"
         conn.execute("UPDATE cameras SET silenced_until = ? WHERE id = ?", (silence_until, dev_id))
         row = conn.execute("SELECT name FROM cameras WHERE id = ?", (dev_id,)).fetchone()
         if row: device_name = row['name']
         
     conn.commit()
     conn.close()
+
+    # --- OPTIMISTIC UX EMIT ---
+    # Instantly tell the frontend we are checking the network. 
+    # We only show this when waking a device UP (hours == 0).
+    if hours == 0:
+        socketio.emit('state_change', {
+            'type': table_name, 
+            'id': dev_id, 
+            'name': device_name,
+            'status': 'EVALUATING...', 
+            'device_type': device_type.capitalize(), 
+            'timestamp': time.time()
+        })
+
     action_text = f"Silenced {device_type} '{device_name}' for {hours}h" if hours > 0 else f"Removed silence from {device_type} '{device_name}'"
     log_audit('User', current_user.username, action_text)
     force_disk_sync()
