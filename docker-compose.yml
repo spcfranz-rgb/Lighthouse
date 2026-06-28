@@ -35,7 +35,7 @@ cctv-coturn:
       --stale-nonce
       --no-cli
       
-  webrtc-relay:
+webrtc-relay:
     image: bluenviron/mediamtx:latest
     container_name: cctv-webrtc
     restart: unless-stopped
@@ -49,7 +49,7 @@ cctv-coturn:
         max-file: "5"
         compress: "true"
 
-  cctv-dashboard:
+cctv-dashboard:
     build: .
     container_name: lighthouse-dashboard
     restart: unless-stopped
