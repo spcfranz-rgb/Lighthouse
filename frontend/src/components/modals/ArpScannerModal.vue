@@ -32,6 +32,7 @@
                   <th class="ps-3">IP Address</th>
                   <th>MAC Address</th>
                   <th>Interface</th>
+                  <th v-if="isAdmin" class="text-end pe-3">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -39,6 +40,9 @@
                   <td class="ps-3 text-info font-monospace">{{ dev.ip }}</td>
                   <td class="font-monospace text-light">{{ dev.mac }}</td>
                   <td><span class="badge bg-secondary">{{ dev.interface }}</span></td>
+                  <td v-if="isAdmin" class="text-end pe-3">
+                    <button class="btn btn-sm btn-outline-info fw-bold py-0" @click="$emit('provision', dev.ip)">➕ Provision</button>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -50,16 +54,18 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import axios from 'axios'
 import { useSystemStore } from '../../stores/systemStore'
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'provision'])
 const store = useSystemStore()
 
 const loading = ref(true)
 const error = ref(null)
 const devices = ref([])
+
+const isAdmin = computed(() => store.user?.role === 'admin')
 
 onMounted(async () => {
   try {
