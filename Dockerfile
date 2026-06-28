@@ -1,7 +1,22 @@
-# Use a lightweight Python base image
+# ==========================================
+# STAGE 1: Frontend Builder (Vue 3 / Vite)
+# ==========================================
+FROM node:20-alpine AS frontend-builder
+WORKDIR /vue-app
+
+# Install dependencies and build the SPA
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ .
+# This compiles everything (including Bootstrap/Socket.io) into /vue-app/dist
+RUN npm run build 
+
+# ==========================================
+# STAGE 2: Python Eventlet Backend (Project Lighthouse)
+# ==========================================
 FROM python:3.9-slim
 
-# Install system dependencies, determine CPU architecture, fetch Ookla native binary, and clean up
+# Install system dependencies, native binaries, and clean up
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         iputils-ping \
@@ -23,18 +38,19 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Copy Python requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code into the container
+# Copy backend application code
 COPY . .
 
-# Expose the port the web GUI will run on
+# CRITICAL: Ingest the compiled SPA from Stage 1 into Flask's static directory
+COPY --from=frontend-builder /vue-app/dist /app/static
+
 EXPOSE 5000
 
-# Boot the container using Gunicorn with Eventlet async workers
+# Boot using Gunicorn with Eventlet
 CMD ["gunicorn", "--worker-class", "eventlet", "-w", "1", "-b", "0.0.0.0:5000", "app:app"]
