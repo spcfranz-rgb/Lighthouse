@@ -15,6 +15,7 @@ export const useSystemStore = defineStore('system', {
     users: [],
     latestSpeedtest: null,
     defaultSubnet: '192.168.1.0/24',
+    webrtcConfig: null, // <-- ADD THIS
     toasts: []
   }),
   actions: {
@@ -43,6 +44,7 @@ export const useSystemStore = defineStore('system', {
         this.users = data.users || []
         this.latestSpeedtest = data.latest_speedtest || null
         this.defaultSubnet = data.default_subnet || '192.168.1.0/24'
+        this.webrtcConfig = data.webrtc_config // <-- HYDRATE THIS
         this.initSocket()
       } catch (error) {
         console.error("Failed to fetch system data:", error)
