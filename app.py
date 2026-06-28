@@ -37,6 +37,9 @@ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from urllib.parse import urlparse
 from functools import wraps
 
+# --- ONVIF Integration ---
+from onvif import ONVIFCamera
+
 from flask import Flask, render_template, request, redirect, url_for, abort, flash, Response, jsonify, send_from_directory, session
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -1006,6 +1009,65 @@ def webrtc_whep(cam_id):
     except requests.exceptions.RequestException as e:
         return f"WebRTC Relay Offline: {str(e)}", 502
 
+
+# ==========================================
+# ONVIF TELEMETRY HELPER (RUNS IN TPOOL)
+# ==========================================
+def probe_onvif_camera(ip, user, pwd):
+    """
+    Attempts to connect to a camera via ONVIF, extract hardware telemetry,
+    and request the primary RTSP Stream URI.
+    
+    CRITICAL: This function performs heavy XML parsing and MUST be run 
+    inside eventlet.tpool.execute() to prevent blocking the async loop.
+    """
+    # Try common ONVIF ports. Port 80 is standard, but 8080 and 8899 are frequent on cheaper IP cameras.
+    for port in [80, 8080, 8899]:
+        try:
+            cam = ONVIFCamera(ip, port, user, pwd)
+            
+            # 1. Hardware Telemetry
+            dev_info = cam.devicemgmt.GetDeviceInformation()
+            make = getattr(dev_info, 'Manufacturer', 'Unknown')
+            model = getattr(dev_info, 'Model', '')
+            
+            # 2. Network Telemetry
+            mac = None
+            try:
+                net_info = cam.devicemgmt.GetNetworkInterfaces()
+                if net_info and len(net_info) > 0:
+                    mac = net_info[0].Info.HwAddress.upper()
+            except Exception: pass
+
+            # 3. Exact RTSP URI Extraction
+            stream_url = None
+            try:
+                media_service = cam.create_media_service()
+                profiles = media_service.GetProfiles()
+                if profiles:
+                    req = media_service.create_type('GetStreamUri')
+                    req.ProfileToken = profiles[0].token
+                    req.StreamSetup = {
+                        'Stream': 'RTP-Unicast',
+                        'Transport': {'Protocol': 'RTSP'}
+                    }
+                    res = media_service.GetStreamUri(req)
+                    stream_url = res.Uri
+            except Exception: pass
+
+            return {
+                "success": True,
+                "make": make,
+                "model": model,
+                "mac": mac,
+                "stream_url": stream_url
+            }
+        except Exception:
+            continue
+            
+    return {"success": False, "error": "ONVIF negotiation failed on all standard ports."}
+
+
 # ==========================================
 # FLASK WEB ROUTES
 # ==========================================
@@ -1349,25 +1411,67 @@ def scan_network():
     new_discoveries = [ip for ip in discovered_ips if ip not in existing_cameras]
     return jsonify({'success': True, 'discovered': new_discoveries, 'total_found': len(discovered_ips), 'already_added': len(discovered_ips) - len(new_discoveries)})
 
+
+# ARCHITECT FIX: Deep ONVIF integration during the bulk-add workflow
 @app.route('/api/add_cameras_bulk', methods=['POST'])
 @login_required
 @admin_required
 def add_cameras_bulk():
     data = request.json
-    if not data or not data.get('ips'): return jsonify({'success': False, 'error': 'No IP addresses selected.'})
+    if not data or not data.get('ips'): 
+        return jsonify({'success': False, 'error': 'No IP addresses selected.'})
 
-    ips, switch_id = data['ips'], data.get('switch_id') or None
-    mfg, user, pwd = data.get('manufacturer', 'Other'), data.get('username', ''), encrypt_pwd(data.get('password', ''))
+    ips = data['ips']
+    switch_id = data.get('switch_id') or None
+    fallback_mfg = data.get('manufacturer', 'Other')
+    user = data.get('username', '')
+    raw_pwd = data.get('password', '')
+    pwd = encrypt_pwd(raw_pwd)
 
     conn = get_db()
     added_count, errors = 0, []
-    for ip in ips:
-        name = f"AutoCam-{ip.replace('.', '-')}"
+    
+    # Process each discovered IP inside our GreenPool to prevent blocking
+    def process_camera(ip):
+        # Fire the heavy ONVIF probe into the OS thread pool
+        onvif_data = eventlet.tpool.execute(probe_onvif_camera, ip, user, raw_pwd)
+        
+        # Default fallbacks if ONVIF negotiation completely fails
+        mfg = fallback_mfg
         stream_url = f"rtsp://{ip}:554/live"
+        name = f"AutoCam-{ip.replace('.', '-')}"
+        mac = None
+        
+        # Override with exact hardware data if ONVIF succeeded
+        if onvif_data.get('success'):
+            mfg = onvif_data.get('make', fallback_mfg)
+            model = onvif_data.get('model', '')
+            
+            # Smart Naming (e.g., Hanwha-XNV-6080R-105)
+            if model:
+                name = f"{mfg}-{model}-{ip.split('.')[-1]}"
+                
+            if onvif_data.get('stream_url'):
+                stream_url = onvif_data['stream_url']
+            if onvif_data.get('mac'):
+                mac = onvif_data['mac']
+        
+        return (ip, name, stream_url, mfg, mac)
+
+    pool = eventlet.greenpool.GreenPool(size=20)
+    results = pool.imap(process_camera, ips)
+
+    for ip, name, stream_url, mfg, mac in results:
         try:
-            conn.execute("""INSERT INTO cameras (switch_id, name, ip, stream_url, manufacturer, username, password) VALUES (?, ?, ?, ?, ?, ?, ?)""", (switch_id, name, ip, stream_url, mfg, user, pwd))
+            conn.execute(
+                """INSERT INTO cameras 
+                   (switch_id, name, ip, stream_url, manufacturer, username, password, mac_address) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", 
+                (switch_id, name, ip, stream_url, mfg, user, pwd, mac or '')
+            )
             added_count += 1
-        except sqlite3.IntegrityError: errors.append(ip)
+        except sqlite3.IntegrityError: 
+            errors.append(ip)
 
     conn.commit()
     conn.close()
@@ -1375,7 +1479,7 @@ def add_cameras_bulk():
     eventlet.spawn_n(sync_mediamtx_cameras)
     force_disk_sync()
     trigger_monitor_check()
-    log_audit('User', current_user.username, f'Bulk added {added_count} cameras')
+    log_audit('User', current_user.username, f'Bulk added {added_count} cameras (Deep ONVIF Scan)')
     return jsonify({'success': True, 'added': added_count, 'errors': errors})
 
 @app.route('/toggle_silence/<device_type>/<int:id>', methods=['POST'])
