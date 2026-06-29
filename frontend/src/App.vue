@@ -23,20 +23,38 @@ const store = useSystemStore()
 const router = useRouter()
 
 let idleTimer
+
 const resetIdleTimer = () => {
   clearTimeout(idleTimer)
-  idleTimer = setTimeout(() => {
-    if (store.user) store.logout()
-  }, 20 * 60 * 1000) // 20 mins
+  
+  // Dynamically grab the timeout setting, default to 20 if undefined/null
+  const timeoutMinutes = parseInt(store.settings?.inactive_timeout ?? 20)
+  
+  // If timeout is > 0, set the timer. If 0, inactivity logout is disabled.
+  if (timeoutMinutes > 0) {
+    idleTimer = setTimeout(() => {
+      if (store.user) {
+        store.logout()
+        store.addToast('Logged out due to inactivity.', 'warning')
+      }
+    }, timeoutMinutes * 60 * 1000)
+  }
 }
 
 onMounted(() => {
-  ['mousemove', 'keydown', 'scroll'].forEach(evt => window.addEventListener(evt, resetIdleTimer, { passive: true }))
+  // Add listeners for activity
+  ['mousemove', 'keydown', 'scroll', 'mousedown'].forEach(evt => 
+    window.addEventListener(evt, resetIdleTimer, { passive: true })
+  )
   resetIdleTimer()
 })
 
 onUnmounted(() => {
-  ['mousemove', 'keydown', 'scroll'].forEach(evt => window.removeEventListener(evt, resetIdleTimer))
+  // Cleanup listeners
+  ['mousemove', 'keydown', 'scroll', 'mousedown'].forEach(evt => 
+    window.removeEventListener(evt, resetIdleTimer)
+  )
+  clearTimeout(idleTimer)
 })
 
 const removeToast = (id) => {
