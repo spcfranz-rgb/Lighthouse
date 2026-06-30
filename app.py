@@ -765,8 +765,15 @@ def monitor_loop():
                     if fetched_mac: 
                         pending_mac_updates.append(('switches', fetched_mac.upper(), switch['id']))
     
-                # 3. Status Construction
+                # 3. Status Construction & State Sync
                 new_status = 'UP' if is_up else 'DOWN'
+                if switch.get('silenced_until', 0) > now: new_status += " (Silenced)"
+                
+                if switch['status'] != new_status:
+                    pending_db_updates.append((now, 'Switch', switch['name'], new_status, 'switches', switch['id']))
+                
+                if mqtt_client and mqtt_client.is_connected():
+                    mqtt_client.publish(f"{mqtt_prefix_global}/{switch['name']}/ping", new_status, retain=True)
 
             # --- 2. Process NVRs (Fast L3 - LAN ONLY) ---
             for nvr in nvrs:
