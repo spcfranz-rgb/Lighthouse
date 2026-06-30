@@ -6,10 +6,10 @@ eventlet.monkey_patch()
 import eventlet.tpool
 
 import os
+import sys
 import time
 import socket
 import sqlite3
-import subprocess
 import threading
 import io
 import csv
@@ -40,7 +40,7 @@ from functools import wraps, lru_cache
 # --- ONVIF Integration ---
 from onvif import ONVIFCamera
 
-from flask import Flask, request, redirect, url_for, abort, jsonify, Response, send_from_directory, session
+from flask import Flask, g, has_app_context, request, redirect, url_for, abort, jsonify, Response, send_from_directory, session
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -53,7 +53,7 @@ app = Flask(__name__, static_folder='static')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 
-# --- SECURITY: CSRF PROTECTION & SESSIONS ---
+# --- SECURITY: CONFIGURATION & HARD-FAIL ---
 secret_key = os.environ.get('SECRET_KEY')
 if not secret_key:
     print("CRITICAL: SECRET_KEY environment variable is not set. Aborting.")
@@ -166,19 +166,32 @@ if KEYCLOAK_URL and KEYCLOAK_REALM:
     )
 
 # ==========================================
-# DATABASE & LOGGING HELPERS
+# DATABASE & CONNECTION POOLING
 # ==========================================
 DB_PATH_DISK = '/app/data/cctv.db'        
 DB_PATH_RAM = '/app/data_ram/cctv.db'     
 force_check_event = Event()
 
 def get_db():
-    os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
+    """Returns a request-scoped connection if in a Flask request, otherwise a standalone connection."""
+    if has_app_context():
+        if 'db' not in g:
+            os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
+            g.db = sqlite3.connect(DB_PATH_RAM, check_same_thread=False, timeout=30)
+            try: g.db.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.OperationalError: pass
+            g.db.row_factory = sqlite3.Row
+        return g.db
+    # Fallback for background threads (manual close required)
     conn = sqlite3.connect(DB_PATH_RAM, check_same_thread=False, timeout=30)
-    try: conn.execute("PRAGMA journal_mode=WAL;")
-    except sqlite3.OperationalError: pass
     conn.row_factory = sqlite3.Row
     return conn
+
+@app.teardown_appcontext
+def close_db(error):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 def log_audit(device_type, device_name, status):
     try:
@@ -186,7 +199,7 @@ def log_audit(device_type, device_name, status):
         conn.execute("INSERT INTO event_logs (timestamp, device_type, device_name, status) VALUES (?, ?, ?, ?)",
                      (time.time(), device_type, device_name, status))
         conn.commit()
-        conn.close()
+        if not has_app_context(): conn.close()
     except Exception: pass
 
 # ==========================================
@@ -205,7 +218,7 @@ class User(UserMixin):
 def load_user(user_id):
     conn = get_db()
     user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    conn.close()
+    if not has_app_context(): conn.close()
     if user: return User(user['id'], user['username'], user['role'])
     return None
 
@@ -241,7 +254,6 @@ def manage_idle_timeout():
         
         conn = get_db()
         idle_row = conn.execute("SELECT value FROM settings WHERE key = 'inactive_timeout'").fetchone()
-        conn.close()
         
         idle_mins = int(idle_row['value']) if idle_row else 20
         
@@ -254,7 +266,7 @@ def manage_idle_timeout():
         session['last_active'] = now
 
 # ==========================================
-# DATABASE INITIALIZATION & RAM SYNC
+# DATABASE INITIALIZATION
 # ==========================================
 def init_ram_db():
     os.makedirs(os.path.dirname(DB_PATH_RAM), exist_ok=True)
@@ -270,7 +282,7 @@ def init_ram_db():
 
 def init_db():
     init_ram_db() 
-    conn = get_db()
+    conn = sqlite3.connect(DB_PATH_RAM)
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS switches (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, ip TEXT, status TEXT DEFAULT 'UNKNOWN')")
@@ -372,7 +384,7 @@ def log_prune_loop():
     while True:
         eventlet.sleep(86400) 
         try:
-            conn = get_db()
+            conn = sqlite3.connect(DB_PATH_RAM)
             seven_days_ago = time.time() - (7 * 24 * 3600)
             conn.execute("DELETE FROM event_logs WHERE timestamp < ?", (seven_days_ago,))
             conn.commit()
