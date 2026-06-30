@@ -23,7 +23,9 @@
               </td>
               <td>
                 <div class="fw-bold">{{ device.ip }}</div>
-                <div class="small text-muted font-monospace" style="font-size: 0.75rem;">{{ device.mac_address || 'Waiting for ARP...' }}</div>
+                <div class="small text-muted font-monospace" style="font-size: 0.75rem;">
+                  {{ device.mac_address ? device.mac_address : (isPrivateLocation(device.ip) ? 'Waiting for ARP...' : 'WAN Target / L3 Routed') }}
+                </div>
               </td>
               <td v-if="type === 'cameras'"><small class="text-muted">{{ device.switch_name || 'Standalone' }}</small></td>
               <td>
