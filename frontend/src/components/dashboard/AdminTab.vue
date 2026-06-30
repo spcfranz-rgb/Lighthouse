@@ -159,11 +159,18 @@ const handleAnalyze = async (event) => {
 
   analyzing.value = true
   const formData = new FormData()
-  formData.append('file', file) // Backend expects raw file stream
+  formData.append('file', file) 
 
   try {
+    // 1. Force the store to fetch a fresh, unexpired CSRF token from the backend
+    await store.checkAuth()
+
+    // 2. Explicitly attach the fresh token to the headers of this specific request
     const response = await axios.post('/api/v1/system/import/analyze', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 
+        'Content-Type': 'multipart/form-data',
+        'X-CSRFToken': store.csrfToken 
+      }
     })
     
     if (response.data.success) {
