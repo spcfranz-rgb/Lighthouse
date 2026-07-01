@@ -38,7 +38,7 @@ import paho.mqtt.client as mqtt
 import imagehash
 from PIL import Image
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlencode
 from functools import wraps
 
 # --- ONVIF Integration ---
@@ -1664,8 +1664,8 @@ def snapshot(id):
     else: return jsonify({'error': "Failed to grab snapshot"}), 500
 
 @csrf.exempt
-@app.route('/tunnel/<device_type>/<int:device_id>/', defaults={'req_path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/tunnel/<device_type>/<int:device_id>/<path:req_path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/tunnel/<device_type>/<int:device_id>/', defaults={'req_path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+@app.route('/tunnel/<device_type>/<int:device_id>/<path:req_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @login_required
 @operator_required
 def tunnel(device_type, device_id, req_path):
@@ -1688,7 +1688,6 @@ def tunnel(device_type, device_id, req_path):
     except socket.gaierror: return f"DNS Error: Could not resolve hostname '{device['ip']}'", 400
     except ValueError: return "Invalid IP or Hostname format.", 400
 
-# [CRITICAL FIX 1]: Allow Auth and Session headers to pass through the proxy
     ALLOWED_HEADERS = {
         'content-type', 'accept', 'cache-control', 'x-requested-with', 
         'user-agent', 'authorization', 'cookie', 'referer'
@@ -1696,9 +1695,19 @@ def tunnel(device_type, device_id, req_path):
     clean_headers = {k: v for k, v in request.headers.items() if k.lower() in ALLOWED_HEADERS}
     clean_headers['Host'] = resolved_ip 
     
-    target_url = f"http://{resolved_ip}/{req_path.lstrip('/')}"
-    query_string = request.query_string.decode('utf-8')
+    # [FIX]: Detect dynamic scheme upgrades statelessly
+    target_scheme = request.args.get('__scheme', 'http')
+    target_url = f"{target_scheme}://{resolved_ip}/{req_path.lstrip('/')}"
+    
+    # Strip our internal __scheme param from the query string sent to the target hardware
+    original_args = request.args.copy()
+    original_args.pop('__scheme', None)
+    query_string = urlencode(original_args) if original_args else ''
+    
     if query_string: target_url += f"?{query_string}"
+
+    # [FIX]: Isolate cookies. Do not bleed the massive Flask 'session' token to fragile embedded hardware
+    clean_cookies = {k: v for k, v in request.cookies.items() if k != 'session'}
 
     try:
         resp = requests.request(
@@ -1706,49 +1715,66 @@ def tunnel(device_type, device_id, req_path):
             url=target_url, 
             headers=clean_headers, 
             data=request.get_data(), 
-            cookies=request.cookies, # [CRITICAL FIX 2]: Forward the Flask request cookies
+            cookies=clean_cookies,
             allow_redirects=False, 
             stream=True, 
             timeout=10, 
             verify=False
         )
         
-        # [CRITICAL FIX]: Strip target headers that block framesets or enforce strict origins
         excluded_headers = [
-            'content-encoding', 
-            'content-length', 
-            'transfer-encoding', 
-            'connection',
-            'x-frame-options',          # Prevent the target from blocking its own frames
-            'content-security-policy',  # Prevent target CSPs from conflicting with the proxy
+            'content-encoding', 'content-length', 'transfer-encoding', 
+            'connection', 'x-frame-options', 'content-security-policy', 
             'strict-transport-security'
         ]
         
-        resp_headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
-        
-        for i, (name, value) in enumerate(resp_headers):
-            if name.lower() == 'location':
-                # Use urljoin to cleanly resolve relative redirects (e.g. 'index.html' -> 'http://ip/index.html')
+        resp_headers = []
+        tunnel_base = f"/tunnel/{device_type}/{device_id}"
+
+        for name, value in resp.raw.headers.items():
+            if name.lower() in excluded_headers:
+                continue
+            
+            # [FIX]: Force Set-Cookie paths to scope strictly to this device's tunnel
+            if name.lower() == 'set-cookie':
+                if re.search(r'path=[^;]+', value, re.IGNORECASE):
+                    value = re.sub(r'path=[^;]+', f'Path={tunnel_base}', value, flags=re.IGNORECASE)
+                else:
+                    value += f"; Path={tunnel_base}"
+
+            # [FIX]: Handle HTTP -> HTTPS Redirect Loops
+            elif name.lower() == 'location':
                 absolute_loc = urljoin(target_url, value)
                 parsed = urlparse(absolute_loc)
                 
                 if parsed.hostname in [device['ip'], resolved_ip]:
-                    new_loc = f"/tunnel/{device_type}/{device_id}{parsed.path}"
-                    if parsed.query: new_loc += f"?{parsed.query}"
-                    resp_headers[i] = (name, new_loc)
+                    new_loc = f"{tunnel_base}{parsed.path}"
+                    
+                    params = []
+                    # If the device is forcing an HTTPS upgrade, append our stateless tracker
+                    if parsed.scheme == 'https' and target_scheme == 'http':
+                        params.append('__scheme=https')
+                        
+                    if parsed.query: params.append(parsed.query)
+                    if params: new_loc += "?" + "&".join(params)
+                    
+                    value = new_loc
+
+            resp_headers.append((name, value))
 
         content_type = resp.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type or 'javascript' in content_type or 'json' in content_type:
             payload = resp.content.decode('utf-8', errors='ignore')
-            payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}/tunnel/{device_type}/{device_id}", payload)
-            payload = payload.replace(device['ip'], f"{request.host}/tunnel/{device_type}/{device_id}")
+            payload = re.sub(rf"(https?|wss?)://{re.escape(device['ip'])}(:\d+)?", f"http://{request.host}{tunnel_base}", payload)
+            payload = payload.replace(device['ip'], f"{request.host}{tunnel_base}")
             if 'text/html' in content_type:
-                base_tag = f'<base href="/tunnel/{device_type}/{device_id}/">\n'
+                base_tag = f'<base href="{tunnel_base}/">\n'
                 payload = re.sub(r'(<head[^>]*>)', rf'\1\n{base_tag}', payload, flags=re.IGNORECASE)
             return Response(payload, resp.status_code, resp_headers)
         else:
             return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
-    except requests.exceptions.RequestException as e: return f"Tunnel Error: {str(e)}", 502
+    except requests.exceptions.RequestException as e: 
+        return f"Tunnel Error: {str(e)}", 502
 
 @csrf.exempt
 @app.errorhandler(404)
