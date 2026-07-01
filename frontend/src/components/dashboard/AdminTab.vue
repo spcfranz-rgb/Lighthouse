@@ -162,25 +162,20 @@ const handleAnalyze = async (event) => {
   formData.append('file', file) 
 
   try {
-    // 1. Force the store to fetch a fresh, unexpired CSRF token from the backend
-    await store.checkAuth()
-
-    // 2. Explicitly attach the fresh token to the headers of this specific request
+    await store.checkAuth() // Ensure CSRF token is fresh
     const response = await axios.post('/api/v1/system/import/analyze', formData, {
-      headers: { 
-        'Content-Type': 'multipart/form-data',
-        'X-CSRFToken': store.csrfToken 
-      }
+      headers: { 'Content-Type': 'multipart/form-data', 'X-CSRFToken': store.csrfToken }
     })
     
     if (response.data.success) {
+      // The analysisData object will now contain 'conflicts' keyed by device name
       analysisData.value = response.data.analysis
     }
   } catch (error) {
-    store.addToast(error.response?.data?.message || 'Failed to analyze CSV file.', 'danger')
+    store.addToast(error.response?.data?.message || 'Failed to analyze CSV.', 'danger')
   } finally {
     analyzing.value = false
-    event.target.value = ''
+    event.target.value = '' // Reset input
   }
 }
 
