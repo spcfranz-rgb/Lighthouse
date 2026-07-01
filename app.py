@@ -5,6 +5,7 @@ import eventlet
 eventlet.monkey_patch()
 import eventlet.tpool
 
+eventlet.tpool.set_num_threads(100)
 import os
 import sys
 import time
@@ -530,8 +531,8 @@ def is_port_open(target, port, timeout=2):
 def is_stream_active(url):
     cmd = ['ffprobe', '-rtsp_transport', 'tcp', '-v', 'error', '-i', url]
     try:
-        result = eventlet.tpool.execute(
-            subprocess.run, 
+        # REMOVED tpool.execute. Monkey-patching handles the async yield naturally.
+        result = subprocess.run( 
             cmd, 
             stdout=subprocess.DEVNULL, 
             stderr=subprocess.DEVNULL, 
@@ -833,19 +834,25 @@ def monitor_loop():
                     if mqtt_client and mqtt_client.is_connected():
                         mqtt_client.publish(f"{mqtt_prefix_global}/{nvr['name']}/ping", new_status, retain=True)
 
-                # --- 3. Process Cameras ---
+               # --- 3. Process Cameras ---
                 for cam in cameras:
                     cam_up = is_pingable(cam['ip'], timeout=1.5) or is_port_open(cam['ip'], 554, timeout=1.5) or is_port_open(cam['ip'], 80, timeout=1.5)
+                    
                     if cam_up:
+                        # Queue it for deep inspection
                         L7_QUEUE.put((cam, cam.get('silenced_until', 0) > now, previous_hashes.get(cam['id']), now))
-                        new_status = 'UP'
+                        
+                        # CRITICAL FIX: Do NOT blindly set new_status = 'UP'. 
+                        # Inherit the current status so the UI doesn't bounce.
+                        # The L7 worker will update it to 'UP' or 'DOWN (Stream Error)' when it finishes.
+                        new_status = cam['status'] 
                     else:
                         new_status = 'DOWN (Offline)'
                         if cam.get('silenced_until', 0) > now: new_status = 'DOWN (Silenced)'
 
                     if cam['status'] != new_status:
                         pending_db_updates.append((now, 'Camera', cam['name'], new_status, 'cameras', cam['id']))
-
+                        
                 # --- 4. Atomic Batch Database Write ---
                 if pending_db_updates or pending_mac_updates:
                     with conn:
