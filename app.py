@@ -1688,7 +1688,11 @@ def tunnel(device_type, device_id, req_path):
     except socket.gaierror: return f"DNS Error: Could not resolve hostname '{device['ip']}'", 400
     except ValueError: return "Invalid IP or Hostname format.", 400
 
-    ALLOWED_HEADERS = {'content-type', 'accept', 'cache-control', 'x-requested-with', 'user-agent'}
+# [CRITICAL FIX 1]: Allow Auth and Session headers to pass through the proxy
+    ALLOWED_HEADERS = {
+        'content-type', 'accept', 'cache-control', 'x-requested-with', 
+        'user-agent', 'authorization', 'cookie', 'referer'
+    }
     clean_headers = {k: v for k, v in request.headers.items() if k.lower() in ALLOWED_HEADERS}
     clean_headers['Host'] = resolved_ip 
     
@@ -1702,7 +1706,7 @@ def tunnel(device_type, device_id, req_path):
             url=target_url, 
             headers=clean_headers, 
             data=request.get_data(), 
-            cookies={}, 
+            cookies=request.cookies, # [CRITICAL FIX 2]: Forward the Flask request cookies
             allow_redirects=False, 
             stream=True, 
             timeout=10, 
