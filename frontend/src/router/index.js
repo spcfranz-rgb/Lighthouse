@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useSystemStore } from '../stores/systemStore'
 import DashboardView from '../views/DashboardView.vue'
 import LoginView from '../views/LoginView.vue'
+import EventLogsView from '../views/EventLogsView.vue' // <-- 1. Add static import here
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -15,7 +16,7 @@ const router = createRouter({
     { 
       path: '/logs', 
       name: 'logs', 
-      component: () => import('../views/EventLogsView.vue'), 
+      component: EventLogsView, // <-- 2. Replace dynamic import with static component
       meta: { requiresAuth: true } 
     },
     { 
