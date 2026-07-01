@@ -80,9 +80,14 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').l
 # --- SECURITY: STRICT AIR-GAPPED CSP ---
 @app.after_request
 def apply_csp(response):
+    # CRITICAL FIX: Do not apply strict CSP to tunneled legacy device UI.
+    # Legacy hardware relies heavily on inline scripts, framesets, and unsafe-eval.
+    if request.path.startswith('/tunnel/'):
+        return response
+
     csp = (
         "default-src 'self'; "
-        "script-src 'self'; " # <--- REMOVED 'unsafe-eval'
+        "script-src 'self'; " 
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob: http: https:; "
         "connect-src 'self' ws: wss:; "
@@ -1704,7 +1709,17 @@ def tunnel(device_type, device_id, req_path):
             verify=False
         )
         
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        # [CRITICAL FIX]: Strip target headers that block framesets or enforce strict origins
+        excluded_headers = [
+            'content-encoding', 
+            'content-length', 
+            'transfer-encoding', 
+            'connection',
+            'x-frame-options',          # Prevent the target from blocking its own frames
+            'content-security-policy',  # Prevent target CSPs from conflicting with the proxy
+            'strict-transport-security'
+        ]
+        
         resp_headers = [(name, value) for (name, value) in resp.raw.headers.items() if name.lower() not in excluded_headers]
         
         for i, (name, value) in enumerate(resp_headers):
