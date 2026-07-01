@@ -23,8 +23,14 @@ const store = useSystemStore()
 const router = useRouter()
 
 let idleTimer
+let throttleTimer = false
 
 const resetIdleTimer = () => {
+  // Throttle to a maximum of 1 execution per second to prevent CPU thrashing
+  if (throttleTimer) return;
+  throttleTimer = true;
+  setTimeout(() => { throttleTimer = false }, 1000);
+
   clearTimeout(idleTimer)
   
   // Dynamically grab the timeout setting, default to 20 if undefined/null
