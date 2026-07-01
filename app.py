@@ -983,6 +983,42 @@ def probe_onvif_camera(ip, user, pwd):
 # FLASK SPA & JSON API ROUTES
 # ==========================================
 
+@app.route('/api/v1/devices/refresh_mac', methods=['POST'])
+@login_required
+@admin_required
+def refresh_mac():
+    data = request.get_json()
+    device_type = data.get('type') # 'switches', 'nvrs', or 'cameras'
+    device_id = data.get('id')
+    
+    if device_type not in ['switches', 'nvrs', 'cameras']:
+        return jsonify({'success': False, 'message': 'Invalid device type'}), 400
+
+    with closing(get_db()) as conn:
+        device = conn.execute(f"SELECT ip FROM {device_type} WHERE id = ?", (device_id,)).fetchone()
+    
+    if not device: return jsonify({'success': False, 'message': 'Device not found'}), 404
+    
+    # Force ARP entry creation via quick UDP probe
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.sendto(b'\x00', (device['ip'], 53535))
+        s.close()
+        eventlet.sleep(0.5) # Wait briefly for ARP reply
+    except Exception: pass
+    
+    mac = get_mac_address(device['ip'])
+    
+    if mac:
+        with closing(get_db()) as conn:
+            conn.execute(f"UPDATE {device_type} SET mac_address = ? WHERE id = ?", (mac, device_id))
+            conn.commit()
+        force_disk_sync()
+        return jsonify({'success': True, 'mac': mac})
+    
+    return jsonify({'success': False, 'message': 'Could not resolve MAC. Device might be offline.'})
+
 @app.route('/api/v1/history', methods=['GET'])
 @login_required
 def api_get_history():
