@@ -81,7 +81,7 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('REQUIRE_HTTPS', 'False').l
 def apply_csp(response):
     csp = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval'; " 
+        "script-src 'self'; " # <--- REMOVED 'unsafe-eval'
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob: http: https:; "
         "connect-src 'self' ws: wss:; "
@@ -766,7 +766,21 @@ def is_local_ip(ip):
         return ip_obj.is_private
     except ValueError:
         return False
-        
+
+def l7_worker_loop():
+    while True:
+        try:
+            # Block until an item is available in the queue
+            cam, cam_silenced, last_hash, check_time = L7_QUEUE.get()
+            
+            # Spawn the heavy L7 check into the bounded GreenPool
+            L7_WORKER_POOL.spawn_n(
+                perform_l7_camera_check, 
+                cam, cam_silenced, last_hash, check_time
+            )
+        except Exception as e:
+            print(f"L7 Worker Error: {e}")
+
 def monitor_loop():
     global force_check_event, mqtt_client, mqtt_prefix_global
 
@@ -1713,6 +1727,7 @@ def tunnel(device_type, device_id, req_path):
             return Response(resp.iter_content(chunk_size=10*1024), resp.status_code, resp_headers)
     except requests.exceptions.RequestException as e: return f"Tunnel Error: {str(e)}", 502
 
+
 @csrf.exempt
 @app.errorhandler(404)
 def proxy_absolute_paths(e):
@@ -1772,6 +1787,7 @@ try:
         print(f"MQTT startup/auth failed: {e}")
 
     socketio.start_background_task(monitor_loop)
+    socketio.start_background_task(l7_worker_loop)
     socketio.start_background_task(automated_speedtest_loop)
     socketio.start_background_task(sync_db_loop)
     socketio.start_background_task(log_prune_loop)
